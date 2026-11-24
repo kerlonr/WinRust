@@ -128,7 +128,7 @@ pub(crate) unsafe fn wifi_glyph(dc: HDC, cx: i32, cy: i32, s: i32, lit: i32, on:
         GdipSetPenEndCap(p, LineCapRound);
         p
     };
-    let (sf, w) = (s as f32, (s as f32 * 0.12).max(1.6));
+    let (sf, w) = (s as f32, if line_icons() { (s as f32 * 0.1).max(1.3) } else { (s as f32 * 0.12).max(1.6) });
     let (bx, by) = (cx as f32, cy as f32 + sf * 0.36); // the point the arcs radiate from
     for i in 0..3 {
         let r = sf * (0.30 + 0.25 * i as f32);
@@ -173,7 +173,7 @@ pub(crate) unsafe fn chevron(dc: HDC, cx: i32, cy: i32, s: i32, deg: f32, c: u32
     }
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
     let mut p: *mut GpPen = null_mut();
-    GdipCreatePen1(0xFF00_0000 | (c & 255) << 16 | (c & 0xFF00) | (c >> 16 & 255), (s as f32 * 0.32).max(1.4), UnitPixel, &mut p);
+    GdipCreatePen1(0xFF00_0000 | (c & 255) << 16 | (c & 0xFF00) | (c >> 16 & 255), if line_icons() { (s as f32 * 0.22).max(1.3) } else { (s as f32 * 0.32).max(1.4) }, UnitPixel, &mut p);
     GdipSetPenStartCap(p, LineCapRound);
     GdipSetPenEndCap(p, LineCapRound);
     let (sn, cs) = deg.to_radians().sin_cos();
@@ -188,14 +188,15 @@ pub(crate) unsafe fn chevron(dc: HDC, cx: i32, cy: i32, s: i32, deg: f32, c: u32
 
 /// The network icon of the bar and the panels, for the current state.
 pub(crate) unsafe fn net_icon(dc: HDC, cx: i32, cy: i32, s: i32, f_glyph: HFONT) {
-    let (on, off) = (pal().text, mix(pal().dim, pal().bg, 0.45));
+    let s = if line_icons() { s * 13 / 17 } else { s };
+    let (on, off) = (icon_ink(), mix(pal().dim, pal().bg, 0.45));
     match net() {
         Link::Wifi(q) => wifi_glyph(dc, cx, cy, s, arcs_lit(q), on, off, 0),
         Link::NoInternet(q) => wifi_glyph(dc, cx, cy, s, arcs_lit(q), mix(on, pal().bg, 0.3), off, 2),
         Link::Offline => wifi_glyph(dc, cx, cy, s, 0, on, mix(pal().dim, pal().bg, 0.2), 1),
         Link::Cable => {
             SelectObject(dc, f_glyph);
-            text(dc, "\u{E839}", RECT { left: cx - s, top: cy - s, right: cx + s, bottom: cy + s }, on, DT_CENTER);
+            sym(dc, "\u{E839}", RECT { left: cx - s, top: cy - s, right: cx + s, bottom: cy + s }, on);
         }
     }
 }

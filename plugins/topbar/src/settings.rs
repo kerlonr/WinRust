@@ -48,6 +48,7 @@ pub(crate) fn style_name(s: i18n::style::Style) -> &'static str {
         Ruby => t!("Рубин", "Ruby", ja: "ルビー", pt: "Rubi", zh: "红宝石"),
         Win98 => "Windows 98",
         Win7 => "Windows 7",
+        Delphos => "Delphos",
     }
 }
 

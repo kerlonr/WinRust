@@ -1329,10 +1329,10 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     let more = rs.iter().find(|(_, a)| *a == Act::WifiMore).unwrap().0;
                     g(Act::WifiMore, more, base, mix(base, pal().text, 0.1), sc(30));
                     SelectObject(dc, f_gs);
-                    text(dc, "\u{E76C}", more, pal().dim, DT_CENTER);
+                    sym(dc, "\u{E76C}", more, pal().dim);
                 } else {
                     SelectObject(dc, f_glyph);
-                    text(dc, glyph, badge, ink, DT_CENTER);
+                    sym(dc, glyph, badge, ink);
                 }
                 SelectObject(dc, f_label);
                 text(dc, label.as_str(), r(tl + 12, tt + 46, tl + 102, tt + 62), pal().text, DT_LEFT);
@@ -1348,13 +1348,13 @@ unsafe fn paint(hw: HWND, k: Kind) {
             let b = BRIGHT.load(Relaxed);
             if b >= 0 {
                 SelectObject(dc, f_glyph);
-                text(dc, "\u{E706}", r(24, y, 60, y + 40), mix(pal().dim, pal().text, 0.5), DT_CENTER);
+                sym(dc, "\u{E706}", r(24, y, 60, y + 40), mix(pal().dim, pal().text, 0.5));
                 track(dc, rs.iter().find(|(_, a)| *a == Act::BrightSlide).unwrap().0, b as f32 / 100.0);
                 y += 44;
             }
             g(Act::Mute, r(24, y + 2, 60, y + 38), card, mix(card, pal().text, 0.08), sc(36));
             SelectObject(dc, f_glyph);
-            text(dc, if muted || vol == 0 { "\u{E74F}" } else { "\u{E767}" }, r(24, y, 60, y + 40), if muted { BAD } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
+            sym(dc, if muted || vol == 0 { "\u{E74F}" } else { "\u{E767}" }, r(24, y, 60, y + 40), if muted { BAD } else { mix(pal().dim, pal().text, 0.5) });
             track(dc, rs.iter().find(|(_, a)| *a == Act::VolSlide).unwrap().0, if muted { 0.0 } else { vol.max(0) as f32 / 100.0 });
             // footer: the battery in a pill, the settings gear in a circle
             let (pct, ac) = BAT.get();
@@ -1362,7 +1362,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 let pill = r(16, h - 48, 102, h - 12);
                 surface(dc, pill, card, sc(36));
                 SelectObject(dc, f_glyph);
-                text(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, r(26, h - 48, 50, h - 12), if ac { GOOD } else if pct <= 15 { BAD } else { pal().text }, DT_CENTER);
+                sym(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, r(26, h - 48, 50, h - 12), if ac { GOOD } else if pct <= 15 { BAD } else { pal().text });
                 SelectObject(dc, f_semi);
                 text(dc, &format!("{pct}%"), r(54, h - 48, 98, h - 12), pal().text, DT_LEFT);
             }
@@ -1370,15 +1370,15 @@ unsafe fn paint(hw: HWND, k: Kind) {
             surface(dc, gear, card, sc(40));
             g(Act::Settings("ms-settings:"), inset(gear, 1), card, mix(card, pal().text, 0.08), sc(38));
             SelectObject(dc, f_glyph);
-            text(dc, "\u{E713}", gear, pal().text, DT_CENTER);
+            sym(dc, "\u{E713}", gear, pal().text);
         }
         Kind::Cal => {
             let (y, m) = CAL.get();
             SelectObject(dc, f_title);
             text(dc, &month_title(y, m), r(16, 10, w - 100, 42), pal().text, DT_LEFT);
             SelectObject(dc, f_glyph);
-            text(dc, "\u{E70E}", r(w - 84, 10, w - 52, 42), pal().text, DT_CENTER);
-            text(dc, "\u{E70D}", r(w - 48, 10, w - 16, 42), pal().text, DT_CENTER);
+            sym(dc, "\u{E70E}", r(w - 84, 10, w - 52, 42), pal().text);
+            sym(dc, "\u{E70D}", r(w - 48, 10, w - 16, 42), pal().text);
             SelectObject(dc, f_small);
             for (i, d) in weekday_initials().iter().enumerate() {
                 text(dc, d, r(18 + 42 * i as i32, 54, 60 + 42 * i as i32, 78), pal().dim, DT_CENTER);
@@ -1548,7 +1548,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                                 }
                             } else {
                                 SelectObject(dc, f_glyph);
-                                text(dc, "\u{E73E}", RECT { left: rc.right - sc(44), right: rc.right - sc(14), ..rc }, ink(pal().accent), DT_CENTER); // check mark
+                                sym(dc, "\u{E73E}", RECT { left: rc.right - sc(44), right: rc.right - sc(14), ..rc }, ink(pal().accent)); // check mark
                             }
                         } else if open && !busy {
                             SelectObject(dc, f_semi);
@@ -1556,7 +1556,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                             text(dc, action, RECT { left: rc.right - sc(130), right: rc.right - sc(16), ..rc }, pal().accent, DT_RIGHT);
                         } else if n.secure && !busy {
                             SelectObject(dc, f_gs);
-                            text(dc, "\u{E72E}", RECT { left: rc.right - sc(42), right: rc.right - sc(14), ..rc }, ink(mix(pal().dim, card, 0.35)), DT_CENTER); // lock
+                            sym(dc, "\u{E72E}", RECT { left: rc.right - sc(42), right: rc.right - sc(14), ..rc }, ink(mix(pal().dim, card, 0.35))); // lock
                         }
                     }
                 });
@@ -1566,7 +1566,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 SelectObject(dc, f_txt);
                 text(dc, t!("Параметры сети", "Network settings", ja: "ネットワーク設定", pt: "Configurações de rede", zh: "网络设置"), RECT { left: lr.left + sc(8), ..lr }, pal().accent, DT_LEFT);
                 SelectObject(dc, f_gs);
-                text(dc, "\u{E76C}", RECT { left: lr.right - sc(34), ..lr }, pal().dim, DT_CENTER); // chevron right
+                sym(dc, "\u{E76C}", RECT { left: lr.right - sc(34), ..lr }, pal().dim); // chevron right
             }
             // the right-click menu unfolds downward from where it was opened
             if let Some((ssid, mx, my, t0)) = CTX.with_borrow(|c| c.clone()) {
@@ -1599,7 +1599,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         DrawIconEx(dc, tile.left + sc(5), tile.top + sc(5), *ic, sc(24), sc(24), 0, null_mut(), DI_NORMAL);
                     } else {
                         SelectObject(dc, f_glyph); // no app icon (Style, Language): the menu's own symbol
-                        text(dc, glyph, tile, pal().accent, DT_CENTER);
+                        sym(dc, glyph, tile, pal().accent);
                     }
                     SelectObject(dc, f_title);
                     text(dc, title, r(60, 10, w - 14, 32), pal().text, DT_LEFT);
@@ -1661,7 +1661,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
         Kind::Start => {
             surface(dc, r(20, 20, w - 20, 56), card, sc(36));
             SelectObject(dc, f_glyph);
-            text(dc, "\u{E721}", r(28, 20, 56, 56), pal().dim, DT_CENTER);
+            sym(dc, "\u{E721}", r(28, 20, 56, 56), pal().dim);
             SelectObject(dc, f_txt);
             let q = QUERY.with_borrow(|q| q.clone());
             if q.is_empty() {
@@ -1672,7 +1672,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             if let Some((kr, ka)) = rects(k).into_iter().find(|(_, a)| *a == Act::Keyboard) {
                 g(ka, kr, card, mix(card, pal().text, 0.1), sc(14));
                 SelectObject(dc, f_glyph);
-                text(dc, "\u{E765}", kr, if hot(ka) { pal().text } else { pal().dim }, DT_CENTER); // keyboard
+                sym(dc, "\u{E765}", kr, if hot(ka) { pal().text } else { pal().dim }); // keyboard
                 SelectObject(dc, f_txt);
             }
             let f = filtered();

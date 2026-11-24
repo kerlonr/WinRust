@@ -20,6 +20,7 @@ extern crate winrust_common;
 use winrust_common as i18n;
 use winrust_common::style::{Style, card, on_accent, pal, rgb, style, ui_face};
 mod clip;
+mod icons;
 mod fly;
 mod quick;
 mod tray;
@@ -29,7 +30,7 @@ mod shot;
 mod lang;
 mod settings;
 mod thumbs;
-use {tray::*, status::*, run::*, shot::*, lang::*, settings::*};
+use {icons::*, tray::*, status::*, run::*, shot::*, lang::*, settings::*};
 use windows::{
     Win32::{
         Media::Audio::{Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender},
@@ -1338,8 +1339,11 @@ struct Layout {
 
 fn layout(w: i32) -> Layout {
     let gap = sc(4);
-    let clock = (w - sc(96), w - sc(6));
-    let sys = (clock.0 - sc(4) - sc(150 + if BAT.get().0 >= 0 { 66 } else { 0 }), clock.0 - sc(4));
+    // the Delphos style: date and time on one line, the battery as an icon alone
+    let slim = line_icons() && !vert();
+    let clock = (w - sc(if !slim { 96 } else if unsafe { clock_texts() }.0.len() > 5 { 160 } else { 136 }), w - sc(6));
+    let bat = BAT.get().0 >= 0;
+    let sys = (clock.0 - sc(4) - sc(if slim { if bat { 148 } else { 114 } } else { 150 + if bat { 66 } else { 0 } }), clock.0 - sc(4));
     let apps = (sys.0 - sc(24) * tray_count() as i32, sys.0);
     let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
     let n = BTNS.with_borrow(|b| b.len()) as i32 + LEAD; // + the search and Task View slots
@@ -1726,7 +1730,9 @@ unsafe fn clock_texts() -> (String, String) {
     GetLocalTime(&mut t);
     let (mut a, mut b) = ([0u16; 40], [0u16; 40]);
     let n = GetTimeFormatW(0x0400, 2, &t, null(), a.as_mut_ptr(), 40).max(1) as usize - 1; // LOCALE_USER_DEFAULT, TIME_NOSECONDS
-    let m = GetDateFormatW(0x0400, 1, &t, null(), b.as_mut_ptr(), 40).max(1) as usize - 1; // DATE_SHORTDATE
+    let short = wide("ddd d MMM"); // fits next to the time
+    let one = line_icons() && !vert();
+    let m = GetDateFormatW(0x0400, if one { 0 } else { 1 }, &t, if one { short.as_ptr() } else { null() }, b.as_mut_ptr(), 40).max(1) as usize - 1; // DATE_SHORTDATE
     (String::from_utf16_lossy(&a[..n]), String::from_utf16_lossy(&b[..m]))
 }
 
@@ -1740,21 +1746,21 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
     let cx = (lft + rgt) / 2;
     let left = i18n::style::side() == i18n::style::Side::Left;
     let hot = HOT.get();
-    let active_bg = mix(pal().active, pal().accent, 0.12);
+    let active_bg = if line_icons() { pal().active } else { mix(pal().active, pal().accent, 0.12) };
     let cell = |y: i32, len: i32| RECT { left: lft, top: y, right: rgt, bottom: y + len };
     let dim = mix(pal().dim, pal().text, 0.5);
 
     let gr = cell(sc(GEAR_X.0), sc(GEAR_X.1));
     glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
-    text(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { dim }, DT_CENTER);
+    sym(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { dim });
 
     let sb = cell(l.x0, l.bw);
     glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, sc(8));
-    text(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { dim }, DT_CENTER);
+    sym(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { dim });
     let tb = cell(l.x0 + l.bw + l.gap, l.bw);
     glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, sc(8));
-    text(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { dim }, DT_CENTER);
+    sym(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { dim });
 
     BTNS.with_borrow(|btns| {
         for (i, b) in btns.iter().enumerate() {
@@ -1769,6 +1775,11 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
             }
             if att {
                 fill(dc, r, mix(pal().bg, pal().accent, 0.4), sc(8));
+            }
+            if i == 0 && line_icons() {
+                SelectObject(dc, f_glyph);
+                sym(dc, START, r, mix(pal().text, pal().accent, th));
+                continue;
             }
             if i == 0 {
                 let t = ((sc(8) as f32) * (1.0 + 0.12 * th) * (1.0 - 0.2 * tp)) as i32;
@@ -1805,7 +1816,7 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
 
     glow(dc, TAPP, hot == TAPP, cell(l.apps.0, sc(24)), pal().bg, pal().hover, sc(8));
     let turn = ease(hv(TF_KEY, IsWindowVisible(TRAYFLY.get()) != 0));
-    chevron(dc, cx, l.apps.0 + sc(12), sc(5), if left { 90.0 } else { 270.0 } + 180.0 * turn, mix(pal().text, pal().accent, turn));
+    chevron(dc, cx, l.apps.0 + sc(12), sc(5), if left { 90.0 } else { 270.0 } + 180.0 * turn, mix(icon_ink(), pal().accent, turn));
     SelectObject(dc, f_txt);
     let bar = bar_idx();
     TAPPS.with_borrow(|t| {
@@ -1825,14 +1836,16 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
     if tg > 0.01 || pg > 0.0 {
         fill(dc, grp, mix(mix(pal().bg, pal().hover, tg), pal().accent, 0.5 * pg), sc(8));
     }
-    text(dc, &lang_name(), cell(l.sys.0, sc(42)), pal().text, DT_CENTER);
+    text(dc, &lang_name(), cell(l.sys.0, sc(42)), icon_ink(), DT_CENTER);
     net_icon(dc, cx, l.sys.0 + sc(58), sc(17), f_glyph);
     SelectObject(dc, f_glyph);
     let (vol, muted) = VOL.get();
-    let vg = if muted || vol == 0 { "\u{E74F}" } else if vol < 34 { "\u{E993}" } else if vol < 67 { "\u{E994}" } else { "\u{E995}" };
-    text(dc, vg, cell(l.sys.0 + sc(79), sc(22)), if muted { BAD } else { pal().text }, DT_CENTER);
+    let vg = vol_glyph(vol, muted);
+    sym(dc, vg, cell(l.sys.0 + sc(79), sc(22)), if muted { BAD } else { icon_ink() });
     let (pct, ac) = BAT.get();
-    if pct >= 0 {
+    if pct >= 0 && line_icons() {
+        sym(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, cell(l.sys.0 + sc(111), sc(22)), if !ac && pct <= 15 { BAD } else { icon_ink() });
+    } else if pct >= 0 {
         let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
         let (bw, bh) = (sc(22), sc(11));
         let (bx, by) = (cx - bw / 2 - sc(1), l.sys.0 + sc(111));
@@ -1886,7 +1899,7 @@ unsafe fn bg_layer(wdc: HDC, cr: RECT) -> HDC {
     SelectObject(dc, bmp); // the DC's first bitmap is the stock 1x1 one: nothing to give back
     BG.set((dc, bmp, key));
     // frosted-glass look: a hairline on top, a faint light catch under it, then the panel colour fading in
-    let lit = mix(pal().bg, pal().text, 0.045);
+    let lit = if line_icons() { pal().bg } else { mix(pal().bg, pal().text, 0.045) };
     if vert() {
         fill(dc, cr, pal().bg, 0);
     } else {
@@ -1904,7 +1917,7 @@ unsafe fn bg_layer(wdc: HDC, cr: RECT) -> HDC {
     if !vert() {
         fill(dc, RECT { left: 0, top: edge, right: cr.right, bottom: edge + 1 }, pal().line, 0);
     }
-    if !at_top() && !vert() {
+    if !at_top() && !vert() && !line_icons() {
         fill(dc, RECT { left: 0, top: 1, right: cr.right, bottom: 2 }, mix(pal().bg, pal().text, 0.08), 0);
     }
     dc
@@ -1954,22 +1967,22 @@ unsafe fn paint(hwnd: HWND) {
     let mid = (top + bot) / 2;
     let cell = |x: i32, w: i32| RECT { left: x, top, right: x + w, bottom: bot };
     let hot = HOT.get();
-    let active_bg = mix(pal().active, pal().accent, 0.12); // the focused app's button: a hint of the accent, not plain grey
+    let active_bg = if line_icons() { pal().active } else { mix(pal().active, pal().accent, 0.12) }; // the focused app's button: a hint of the accent, not plain grey
 
     // the gear at the left end: the Style menu
     let gr = RECT { left: sc(GEAR_X.0), top, right: sc(GEAR_X.0 + GEAR_X.1), bottom: bot };
     glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
-    text(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
+    sym(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) });
 
     // search button (left of Start)
     let sb = RECT { left: l.x0, top, right: l.x0 + l.bw, bottom: bot };
     glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
-    text(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
+    sym(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) });
     let tb = RECT { left: l.x0 + l.bw + l.gap, top, right: l.x0 + 2 * l.bw + l.gap, bottom: bot };
     glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, sc(8));
-    text(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { mix(pal().dim, pal().text, 0.5) }, DT_CENTER);
+    sym(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { mix(pal().dim, pal().text, 0.5) });
 
     // Start, pinned apps, open windows (center)
     BTNS.with_borrow(|btns| {
@@ -1984,6 +1997,11 @@ unsafe fn paint(hwnd: HWND) {
             }
             if att {
                 fill(dc, r, mix(pal().bg, pal().accent, 0.4), sc(8));
+            }
+            if i == 0 && line_icons() {
+                SelectObject(dc, f_glyph);
+                sym(dc, START, r, mix(pal().text, pal().accent, th));
+                continue;
             }
             if i == 0 {
                 // Windows logo in four tiles, lit from the top left; grows a little on hover, squeezes on click
@@ -2030,7 +2048,7 @@ unsafe fn paint(hwnd: HWND) {
     let open_tf = IsWindowVisible(TRAYFLY.get()) != 0;
     let turn = ease(hv(TF_KEY, open_tf)); // the chevron turns over as the flyout opens, and back
     let cc = cell(l.apps.0, sc(24));
-    chevron(dc, (cc.left + cc.right) / 2, mid, sc(5), if at_top() { 180.0 } else { 0.0 } + 180.0 * turn, mix(pal().text, pal().accent, turn));
+    chevron(dc, (cc.left + cc.right) / 2, mid, sc(if line_icons() { 4 } else { 5 }), if at_top() { 180.0 } else { 0.0 } + 180.0 * turn, mix(icon_ink(), pal().accent, turn));
     SelectObject(dc, f_txt);
     let bar = bar_idx();
     TAPPS.with_borrow(|t| {
@@ -2053,17 +2071,19 @@ unsafe fn paint(hwnd: HWND) {
         fill(dc, grp, mix(mix(pal().bg, pal().hover, tg), pal().accent, 0.5 * pg), sc(8));
     }
     let mut x = tb.left + sc(10);
-    text(dc, &lang_name(), cell(x, sc(34)), pal().text, DT_LEFT);
+    text(dc, &lang_name(), cell(x, sc(34)), icon_ink(), DT_LEFT);
     x += sc(42);
     net_icon(dc, x + sc(9), mid, sc(17), f_glyph);
     x += sc(32);
     SelectObject(dc, f_glyph);
     let (vol, muted) = VOL.get();
-    let vg = if muted || vol == 0 { "\u{E74F}" } else if vol < 34 { "\u{E993}" } else if vol < 67 { "\u{E994}" } else { "\u{E995}" };
-    text(dc, vg, cell(x, sc(22)), if muted { BAD } else { pal().text }, DT_CENTER);
+    let vg = vol_glyph(vol, muted);
+    sym(dc, vg, cell(x, sc(22)), if muted { BAD } else { icon_ink() });
     x += sc(32);
     let (pct, ac) = BAT.get();
-    if pct >= 0 {
+    if pct >= 0 && line_icons() {
+        sym(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, cell(x, sc(22)), if !ac && pct <= 15 { BAD } else { icon_ink() });
+    } else if pct >= 0 {
         let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
         let (bw, bh, by) = (sc(22), sc(11), mid - sc(5));
         fill(dc, RECT { left: x, top: by, right: x + bw, bottom: by + bh }, col, sc(4)); // outline
@@ -2075,10 +2095,21 @@ unsafe fn paint(hwnd: HWND) {
         text(dc, &format!("{pct}%"), cell(x + bw + sc(8), sc(40)), pal().text, DT_LEFT);
     }
 
-    // time (semibold) over the date (dimmed)
+    // time (semibold) over the date (dimmed), or both on one line in the Delphos style
     let cb = cell(l.clock.0, l.clock.1 - l.clock.0);
     glow(dc, CLOCK, hot == CLOCK || fly::is_open(fly::Kind::Cal), cb, pal().bg, pal().hover, sc(8));
     let (tm, dt) = clock_texts();
+    if line_icons() {
+        SelectObject(dc, f_bold);
+        let wtm = wide(&tm);
+        let mut sz: SIZE = zeroed();
+        GetTextExtentPoint32W(dc, wtm.as_ptr(), wtm.len() as i32 - 1, &mut sz);
+        let tx = cb.right - sc(10) - sz.cx;
+        text(dc, &tm, RECT { left: tx, right: cb.right, ..cb }, pal().text, DT_LEFT);
+        SelectObject(dc, f_small);
+        text(dc, &dt, RECT { left: cb.left + sc(8), right: tx - sc(8), ..cb }, pal().dim, DT_RIGHT);
+        break 'horiz;
+    }
     SelectObject(dc, f_bold);
     text(dc, &tm, RECT { left: cb.left, top: cb.top, right: cb.right, bottom: mid + sc(1) }, pal().text, DT_CENTER);
     SelectObject(dc, f_small);
@@ -2914,6 +2945,37 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     0
 }
 
+/// `--preview bar`: the bar painted in a plain window above the real taskbar, which is left alone.
+unsafe fn preview_bar() {
+    unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+        if m == WM_PAINT {
+            paint(h);
+            return 0;
+        }
+        if m == WM_TIMER {
+            InvalidateRect(h, null(), 0);
+            return 0;
+        }
+        DefWindowProcW(h, m, w, l)
+    }
+    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    let dc = GetDC(null_mut());
+    SCALE.set(GetDeviceCaps(dc, LOGPIXELSX as i32) as f32 / 96.0);
+    ReleaseDC(null_mut(), dc);
+    load_pins();
+    refresh_buttons();
+    read_volume();
+    read_wifi();
+    let mut s: SYSTEM_POWER_STATUS = zeroed();
+    if GetSystemPowerStatus(&mut s) != 0 && s.BatteryFlag & 128 == 0 && s.BatteryLifePercent <= 100 {
+        BAT.set((s.BatteryLifePercent as i32, s.ACLineStatus == 1));
+    }
+    let class = wide("topbar_previewbar");
+    let hi = GetModuleHandleW(null());
+    RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hi, lpszClassName: class.as_ptr(), ..zeroed() });
+    CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, class.as_ptr(), null(), WS_POPUP | WS_VISIBLE, 0, GetSystemMetrics(SM_CYSCREEN) - 3 * bar_h(), GetSystemMetrics(SM_CXSCREEN), bar_h(), null_mut(), null_mut(), hi, null());
+}
+
 fn main() {
     unsafe {
         if std::env::args().any(|a| a == "--restore") {
@@ -2931,7 +2993,7 @@ fn main() {
             screenshot();
             return;
         }
-        // `topbar --preview quick|wifi`: one flyout on its own (no bar, no hooks), to look at a style change; the process is closed by hand
+        // `topbar --preview quick|wifi|bar`: one flyout (or the bar, painted only) on its own (no bar, no hooks), to look at a style change; the process is closed by hand
         if let Some(p) = std::env::args().skip_while(|a| a != "--preview").nth(1) {
             SetProcessDPIAware();
             let (mut tok, mut inp): (usize, GdiplusStartupInput) = (0, zeroed());
@@ -2939,7 +3001,11 @@ fn main() {
             GdiplusStartup(&mut tok, &inp, null_mut());
             fly::init(GetModuleHandleW(null()));
             fly::PREVIEW.store(true, Relaxed);
-            fly::toggle(if p == "wifi" { fly::Kind::Wifi } else { fly::Kind::Quick });
+            if p == "bar" {
+                preview_bar();
+            } else {
+                fly::toggle(if p == "wifi" { fly::Kind::Wifi } else { fly::Kind::Quick });
+            }
             let mut msg: MSG = zeroed();
             while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
                 TranslateMessage(&msg);
