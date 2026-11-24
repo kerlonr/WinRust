@@ -101,15 +101,15 @@ fn swap(c: u32) -> u32 {
 
 /// Blurs a picture, livens its colours, holds bright areas down and lays the tint (COLORREF) over it at strength `k`.
 fn frost(src: &[u32], w: usize, h: usize, tint: u32, k: f32) -> Vec<u32> {
-    const D: usize = 4;
+    const D: usize = 8;
     let (sw, sh) = (w.div_ceil(D), h.div_ceil(D));
     let mut a: Vec<[f32; 3]> = Vec::with_capacity(sw * sh);
     for y in 0..sh {
         for x in 0..sw {
             let mut s = [0u32; 3];
             let mut n = 0;
-            for yy in (y * D..(y * D + D).min(h)).step_by(2) {
-                for xx in (x * D..(x * D + D).min(w)).step_by(2) {
+            for yy in (y * D..(y * D + D).min(h)).step_by(3) {
+                for xx in (x * D..(x * D + D).min(w)).step_by(3) {
                     let p = src[yy * w + xx];
                     s[0] += p >> 16 & 255;
                     s[1] += p >> 8 & 255;
@@ -123,8 +123,8 @@ fn frost(src: &[u32], w: usize, h: usize, tint: u32, k: f32) -> Vec<u32> {
     // three box passes are a gaussian to the eye
     let mut b = a.clone();
     for _ in 0..3 {
-        blur_lines(&a, &mut b, sw, sh, 1, sw, 7);
-        blur_lines(&b, &mut a, sh, sw, sw, 1, 7);
+        blur_lines(&a, &mut b, sw, sh, 1, sw, 4);
+        blur_lines(&b, &mut a, sh, sw, sw, 1, 4);
     }
     let t = swap(tint);
     let t = [(t >> 16 & 255) as f32, (t >> 8 & 255) as f32, (t & 255) as f32];
@@ -176,20 +176,24 @@ fn blur_lines(src: &[[f32; 3]], dst: &mut [[f32; 3]], n: usize, lines: usize, st
 
 /// How strongly the tint covers the glass; the bar's transparency setting (30..100 %) moves it.
 fn strength() -> f32 {
-    0.36 + 0.36 * (i18n::style::bar_opacity() as f32 / 100.0)
+    0.20 + 0.36 * (i18n::style::bar_opacity() as f32 / 100.0)
 }
 
-/// The screen between `x` and `x + w` as it looks now, frosted. Full height: a panel that grows or slides still finds its glass.
-pub(crate) unsafe fn capture(x: i32, w: i32) -> Option<Backdrop> {
-    DwmFlush(); // a panel closed just now is off the screen first
-    let h = GetSystemMetrics(SM_CYSCREEN);
+/// The screen in `r` as it looks now, frosted. `flush`: a panel closed just now leaves the screen first.
+pub(crate) unsafe fn capture(r: RECT, flush: bool) -> Option<Backdrop> {
+    if flush {
+        DwmFlush();
+    }
+    let (x, y) = (r.left, r.top.max(0));
+    let (w, h) = (r.right - x, r.bottom.min(GetSystemMetrics(SM_CYSCREEN)) - y);
     let d = Dib::new(w, h)?;
+    let (w, h) = (d.w, d.h);
     let scr = GetDC(null_mut());
-    BitBlt(d.dc, 0, 0, w, h, scr, x, 0, SRCCOPY);
+    BitBlt(d.dc, 0, 0, w, h, scr, x, y, SRCCOPY);
     ReleaseDC(null_mut(), scr);
     let px = frost(d.pixels(), w as usize, h as usize, pal().bg, strength());
     d.free();
-    Some(Backdrop { x, y: 0, w, h, px })
+    Some(Backdrop { x, y, w, h, px })
 }
 
 /// The wallpaper changed: the bar's glass is made again.

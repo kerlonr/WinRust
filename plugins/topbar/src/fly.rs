@@ -995,7 +995,10 @@ pub fn toggle(k: Kind) {
             }
             Kind::Quick => {
                 read_brightness();
-                read_nets();
+                crate::quick::flags();
+                if !line_icons() || NETS.with_borrow(|n| n.is_empty()) {
+                    read_nets(); // else the list known from last time does until the panel is open (timer 9)
+                }
                 crate::quick::refresh();
             }
             Kind::Start => {
@@ -1014,9 +1017,10 @@ pub fn toggle(k: Kind) {
         let class = wide("topbar_fly");
         let fy = if vert() && k == Kind::Menu { (MENU_X.get() - h / 2).clamp(sc(8), GetSystemMetrics(SM_CYSCREEN) - h - sc(8)) } else { pop_y(h) }; // above the bar (below it at the top of the screen)
         if line_icons() {
+            let ghost = !GHOST.get().0.is_null();
             kill_ghost(); // the panel this one replaces must not end up in its glass
-            BACKDROP.set(crate::glass::capture(x, w));
-            T0.set(now_ms());
+            // room above for a list that grows and below for the opening slide
+            BACKDROP.set(crate::glass::capture(RECT { left: x, top: fy - sc(160), right: x + w, bottom: fy + h + sc(24) }, ghost));
         }
         let hw = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, class.as_ptr(), null(), WS_POPUP, x, fy + sc(14), w, h, null_mut(), null_mut(), GetModuleHandleW(null()), null());
         if line_icons() {
@@ -1042,9 +1046,12 @@ pub fn toggle(k: Kind) {
         ShowWindow(hw, SW_SHOW);
         if line_icons() {
             RedrawWindow(hw, null(), null_mut(), RDW_INVALIDATE | RDW_UPDATENOW); // the first picture before the fade starts
-            T0.set(now_ms());
         }
         force_fg(hw);
+        if line_icons() {
+            T0.set(now_ms()); // the clock starts once the slow part is over: no jump in the first frames
+            SetTimer(hw, 9, 450, None);
+        }
         SetTimer(hw, 1, 1000, None);
         SetTimer(hw, 3, FRAME, None);
     }
@@ -1387,7 +1394,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 _ if NETS.with_borrow(|n| n.is_empty()) => t!("Выключен", "Off", ja: "オフ", pt: "Desligado", zh: "关").into(),
                 _ => t!("Не подключено", "Not connected", ja: "未接続", pt: "Não conectado", zh: "未连接").into(),
             };
-            let (bt, air, acc, eco) = (crate::quick::bluetooth(), crate::quick::airplane(), crate::quick::accessibility_on(), crate::quick::energy_saver());
+            let (bt, air, (acc, eco)) = (crate::quick::bluetooth(), crate::quick::airplane(), crate::quick::flags());
             let bsub = match bt {
                 Some(true) => t!("Вкл.", "On", ja: "オン", pt: "Ligado", zh: "开"),
                 Some(false) => t!("Выкл.", "Off", ja: "オフ", pt: "Desligado", zh: "关"),
@@ -1499,7 +1506,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 _ if NETS.with_borrow(|n| n.is_empty()) => t!("Выключен", "Off", ja: "オフ", pt: "Desligado", zh: "关").into(),
                 _ => t!("Не подключено", "Not connected", ja: "未接続", pt: "Não conectado", zh: "未连接").into(),
             };
-            let (bt, air, acc, eco) = (crate::quick::bluetooth(), crate::quick::airplane(), crate::quick::accessibility_on(), crate::quick::energy_saver());
+            let (bt, air, (acc, eco)) = (crate::quick::bluetooth(), crate::quick::airplane(), crate::quick::flags());
             let onoff = |b: Option<bool>| match b {
                 Some(true) => t!("Вкл.", "On", ja: "オン", pt: "Ligado", zh: "开").to_string(),
                 Some(false) => t!("Выкл.", "Off", ja: "オフ", pt: "Desligado", zh: "关").to_string(),
@@ -2027,6 +2034,13 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             }
         }
         WM_DROPFILES => on_files(hw, wp as HDROP),
+        WM_TIMER if wp == 9 => {
+            KillTimer(hw, 9);
+            if k == Kind::Quick {
+                read_nets();
+                InvalidateRect(hw, null(), 0);
+            }
+        }
         WM_TIMER if wp == 2 => {
             InvalidateRect(hw, null(), 0);
         }
@@ -2066,6 +2080,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     press(TILE_KEY + i as i32);
                 }
                 run_act(a, rc, x);
+                crate::quick::flags_stale();
             }
             if FLY.get().is_some() {
                 InvalidateRect(hw, null(), 0);

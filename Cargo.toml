@@ -57,6 +57,9 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+[profile.release.package.topbar]
+opt-level = 3 # glass and animations: speed over size
+
 [profile.release.package.rs-du]
 opt-level = 3 # MFT parsing: speed over size, as before the workspace
 
