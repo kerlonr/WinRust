@@ -1789,7 +1789,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     text(dc, title, r(60, 10, w - 14, 32), pal().text, DT_LEFT);
                     SelectObject(dc, f_small);
                     text(dc, sub, r(60, 30, w - 14, 48), pal().dim, DT_LEFT);
-                    fill(dc, r(12, MHEAD_H + 4, w - 12, MHEAD_H + 5), pal().line, 0);
+                    fill(dc, RECT { bottom: sc(MHEAD_H + 4) + 1, ..r(12, MHEAD_H + 4, w - 12, MHEAD_H + 5) }, pal().line, 0);
                 }
             });
             let rs = rects(k);
@@ -1799,7 +1799,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 for (it, (t, b)) in items.iter().zip(menu_rows().0) {
                     if it.head {
                         if it.sep {
-                            fill(dc, r(12, t - 5, w - 12, t - 4), pal().line, 0);
+                            fill(dc, RECT { bottom: sc(t - 5) + 1, ..r(12, t - 5, w - 12, t) }, pal().line, 0);
                         }
                         text(dc, &it.label, r(20, t + 8, w - 14, b), pal().dim, DT_LEFT);
                     }

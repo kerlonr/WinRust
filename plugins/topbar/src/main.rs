@@ -3164,6 +3164,11 @@ fn main() {
             return;
         }
         normal_priority();
+        // `topbar --open <path>`: opens it the way a pin does, through the running Explorer; exit code 1 = that did not work
+        if let Some(p) = std::env::args().skip_while(|a| a != "--open").nth(1) {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            std::process::exit(!shell_open(&p) as i32);
+        }
         // Atomic single-instance guard (FindWindow alone raced when two launchers started us at once); the handle lives until exit.
         let m = windows_sys::Win32::System::Threading::CreateMutexW(null(), 0, wide("Local\\topbar-single").as_ptr());
         if m.is_null() || GetLastError() == ERROR_ALREADY_EXISTS || !FindWindowW(wide("topbar").as_ptr(), null()).is_null() {
