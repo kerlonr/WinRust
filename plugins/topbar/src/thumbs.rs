@@ -58,14 +58,15 @@ pub(crate) fn card_at(rects: &[RECT], x: i32, y: i32) -> Option<usize> {
 
 thread_local! {
     // Each popup owns copies of its icons until it is relaid out or closed.
+    static BIG_ICONS: RefCell<HashMap<String, HICON>> = RefCell::new(HashMap::new()); // by exe: the shell takes its time drawing one
     static CARD_ICONS: RefCell<HashMap<usize, Vec<HICON>>> = RefCell::new(HashMap::new());
 }
 
 unsafe fn load_card_icon(w: HWND) -> HICON {
     let exe = exe_of(w);
     // Generic hosts represent many unrelated applications; preserve the window's icon.
-    let shell_icon = if exe.is_empty() || is_host(&exe) { null_mut() } else { item_icon(&exe, sc(48)) };
-    if !shell_icon.is_null() { return shell_icon; }
+    let shell_icon = if exe.is_empty() || is_host(&exe) { null_mut() } else { BIG_ICONS.with_borrow_mut(|m| *m.entry(exe.clone()).or_insert_with(|| item_icon(&exe, sc(48)))) };
+    if !shell_icon.is_null() { return CopyIcon(shell_icon); }
     let window_icon = icon_of(w);
     if window_icon.is_null() { null_mut() } else { CopyIcon(window_icon) }
 }
@@ -118,8 +119,7 @@ pub(crate) unsafe fn paint(host: HWND, wins: &[HWND], rects: &[RECT], ids: &[isi
     GetClientRect(host, &mut r);
     let (mem, bmp) = (CreateCompatibleDC(dc), CreateCompatibleBitmap(dc, r.right, r.bottom));
     let ob = SelectObject(mem, bmp);
-    fill(mem, r, pal().line, sc(18));
-    fill(mem, RECT { left: 1, top: 1, right: r.right - 1, bottom: r.bottom - 1 }, pal().bg, sc(18));
+    frame(mem, r, pal().line, sc(18));
     let f = CreateFontW(-sc(12), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, wide(ui_face()).as_ptr());
     let of = SelectObject(mem, f);
     SetBkMode(mem, TRANSPARENT as i32);
@@ -187,7 +187,7 @@ unsafe fn layout(pv: HWND, wins: Vec<HWND>, cx: i32) {
     let old = PV.take();
     let mut ids = old.2;
     unregister(pv, &mut ids);
-    SetWindowRgn(pv, CreateRoundRectRgn(0, 0, w + 1, h + 1, rr(18), rr(18)), 1);
+    round_window(pv, w, h, 18);
     if vert() {
         let y = (cx - h / 2).clamp(sc(4), sch - h - sc(4));
         SetWindowPos(pv, HWND_TOPMOST, side_x(w), y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -240,7 +240,7 @@ pub(crate) unsafe extern "system" fn pv_proc(hwnd: HWND, msg: u32, wp: WPARAM, l
             } else {
                 hide_preview();
                 if IsIconic(w) != 0 {
-                    ShowWindow(w, SW_RESTORE);
+                    ShowWindowAsync(w, SW_RESTORE);
                 }
                 force_fg(w);
             }

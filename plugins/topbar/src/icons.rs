@@ -21,7 +21,12 @@ pub(crate) fn vol_glyph(vol: i32, muted: bool) -> &'static str {
 
 /// An icon centered in `r`, as tall as the selected font: the line icon where the style has one, else the font's own glyph.
 pub(crate) unsafe fn sym(dc: HDC, s: &str, r: RECT, c: u32) {
-    if !line_icons() || !draw(dc, s, r, c) {
+    sym_t(dc, s, r, c, 0.0);
+}
+
+/// `sym` at hover progress `t` (0..1): the icons that react to the pointer move with it.
+pub(crate) unsafe fn sym_t(dc: HDC, s: &str, r: RECT, c: u32, t: f32) {
+    if !line_icons() || !draw(dc, s, r, c, t) {
         text(dc, s, r, c, DT_CENTER);
     }
 }
@@ -34,6 +39,7 @@ struct Ink {
     y: f32,
     k: f32,
     argb: u32,
+    t: f32,
 }
 
 impl Ink {
@@ -78,7 +84,7 @@ impl Ink {
 }
 
 /// Draws the line icon standing in for the font glyph `s`; false when there is none.
-unsafe fn draw(dc: HDC, s: &str, r: RECT, c: u32) -> bool {
+unsafe fn draw(dc: HDC, s: &str, r: RECT, c: u32, t: f32) -> bool {
     let mut lf: LOGFONTW = zeroed();
     GetObjectW(GetCurrentObject(dc, OBJ_FONT as u32), size_of::<LOGFONTW>() as i32, &mut lf as *mut _ as *mut _);
     let px = (lf.lfHeight.abs() as f32 * 1.125).max(10.0); // the 24-unit box keeps a margin the font's glyphs do not have
@@ -95,7 +101,7 @@ unsafe fn draw(dc: HDC, s: &str, r: RECT, c: u32) -> bool {
     GdipSetPenStartCap(p, LineCapRound);
     GdipSetPenEndCap(p, LineCapRound);
     GdipSetPenLineJoin(p, LineJoinRound);
-    let i = Ink { g, p, x: (r.left + r.right) as f32 / 2.0 - px / 2.0, y: (r.top + r.bottom) as f32 / 2.0 - px / 2.0, k, argb };
+    let i = Ink { g, p, x: (r.left + r.right) as f32 / 2.0 - px / 2.0, y: (r.top + r.bottom) as f32 / 2.0 - px / 2.0, k, argb, t };
     let known = shape(&i, s);
     GdipDeletePen(p);
     GdipDeleteGraphics(g);
@@ -106,12 +112,12 @@ unsafe fn shape(i: &Ink, s: &str) -> bool {
     match s {
         // settings: two sliders
         "\u{E713}" => {
-            i.line(&[(4.0, 8.0), (11.5, 8.0)]);
-            i.line(&[(18.5, 8.0), (20.0, 8.0)]);
-            i.circle(15.0, 8.0, 2.8);
-            i.line(&[(4.0, 16.0), (5.5, 16.0)]);
-            i.line(&[(12.5, 16.0), (20.0, 16.0)]);
-            i.circle(9.0, 16.0, 2.8);
+            // the knobs trade places under the pointer
+            for (x, y) in [(15.0 - 6.0 * i.t, 8.0), (9.0 + 6.0 * i.t, 16.0)] {
+                i.line(&[(4.0, y), (x - 3.0, y)]);
+                i.line(&[(x + 3.0, y), (20.0, y)]);
+                i.circle(x, y, 2.8);
+            }
         }
         // search
         "\u{E721}" => {
@@ -195,7 +201,7 @@ unsafe fn shape(i: &Ink, s: &str) -> bool {
         // Start: four outlined tiles
         START => {
             for (x, y) in [(3.5, 3.5), (13.5, 3.5), (3.5, 13.5), (13.5, 13.5)] {
-                i.rect(x, y, 7.0, 7.0, 2.0, false);
+                i.rect(x, y, 7.0, 7.0, 2.0 + 1.5 * i.t, false); // tiles round into dots under the pointer
             }
         }
         _ => return false,

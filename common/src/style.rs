@@ -16,7 +16,7 @@ pub enum Style {
     Ruby,     // deep ruby, a smooth glossy gradient
     Win98,    // BETA: classic grey, navy accent, square corners, Tahoma
     Win7,     // BETA: Aero-like glass blue
-    Delphos,  // flat near-black with an ice accent and thin line icons
+    Delphos,  // flat graphite with an ice accent and thin line icons
 }
 
 pub const ALL: [Style; 9] = [Style::Normal, Style::Terminal, Style::Dock, Style::Tiling, Style::Road, Style::Ruby, Style::Win98, Style::Win7, Style::Delphos];
@@ -259,8 +259,8 @@ pub const PALS: [Pal; 9] = [
     Pal { bg: rgb(192, 192, 192), line: rgb(128, 128, 128), hover: rgb(212, 208, 200), active: rgb(160, 160, 160), accent: rgb(0, 0, 128), text: rgb(0, 0, 0), dim: rgb(64, 64, 64) },
     // win7: Aero glass blue
     Pal { bg: rgb(31, 58, 96), line: rgb(72, 108, 154), hover: rgb(58, 92, 138), active: rgb(74, 112, 160), accent: rgb(120, 190, 255), text: rgb(255, 255, 255), dim: rgb(176, 198, 226) },
-    // delphos: near-black with a hint of violet, the ice blue of its OLED
-    Pal { bg: rgb(7, 6, 10), line: rgb(29, 27, 36), hover: rgb(27, 26, 35), active: rgb(32, 31, 39), accent: rgb(143, 211, 255), text: rgb(237, 235, 243), dim: rgb(139, 135, 154) },
+    // delphos: graphite with the ice blue of its OLED
+    Pal { bg: rgb(27, 27, 30), line: rgb(51, 50, 56), hover: rgb(42, 42, 47), active: rgb(48, 48, 54), accent: rgb(143, 211, 255), text: rgb(240, 239, 244), dim: rgb(150, 148, 160) },
 ];
 
 /// Status colours shared by every style (Apple's dark-mode system green, yellow, red).

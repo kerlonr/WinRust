@@ -118,6 +118,7 @@ unsafe fn pop_y(h: i32) -> i32 {
 const GOOD: u32 = winrust_common::style::GOOD;
 const BAD: u32 = winrust_common::style::BAD;
 const WARN: u32 = winrust_common::style::WARN;
+const FRAME: u32 = 10; // ms between animation frames: WM_TIMER runs on a 15.6 ms clock, so asking for 16 gave every second tick
 const CALLBACK: u32 = WM_APP + 1;
 const WM_MOUSELEAVE: u32 = 0x02A3; // not exported under the enabled features
 const NO_WINDOW: u32 = 0x0800_0000;
@@ -259,7 +260,40 @@ fn sc(v: i32) -> i32 {
 }
 fn bar_h() -> i32 {
     let d = [-6, 0, 8][i18n::style::bar_size() as usize % 3]; // small / normal / large
-    if vert() { sc(60 + d) } else { sc(BAR_H + d) }
+    if vert() { sc(60 + d) } else { sc(BAR_H + d + if line_icons() { 8 } else { 0 }) }
+}
+/// The roomier spacing of the Delphos style (bottom bar only).
+fn airy() -> bool {
+    line_icons() && !vert()
+}
+/// Width of one tray icon's slot.
+fn tcell() -> i32 {
+    sc(if airy() { 32 } else { 24 })
+}
+/// Right ends of the language, network and volume cells inside the system group, logical px.
+fn sys_ends() -> (i32, i32, i32) {
+    if airy() { (48, 92, 128) } else { (42, 74, 106) }
+}
+/// Rounds a popup's corners: a region, or DWM's anti-aliased corners and hairline in the Delphos style.
+unsafe fn round_window(h: HWND, w: i32, hh: i32, rad: i32) {
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+    let set = |a: u32, v: u32| DwmSetWindowAttribute(h, a, &v as *const _ as *const _, 4);
+    if line_icons() && set(33, if rad <= 8 { 3 } else { 2 }) == 0 {
+        set(34, pal().line); // DWMWA_BORDER_COLOR
+        SetWindowRgn(h, null_mut(), 1);
+    } else {
+        set(33, 1); // back to square: the region rounds it
+        SetWindowRgn(h, CreateRoundRectRgn(0, 0, w + 1, hh + 1, rr(rad), rr(rad)), 1);
+    }
+}
+/// A popup's background with its hairline (DWM draws the edge in the Delphos style).
+unsafe fn frame(dc: HDC, r: RECT, edge: u32, rad: i32) {
+    if line_icons() {
+        fill(dc, r, pal().bg, 0);
+    } else {
+        fill(dc, r, edge, rad);
+        fill(dc, RECT { left: r.left + 1, top: r.top + 1, right: r.right - 1, bottom: r.bottom - 1 }, pal().bg, rad);
+    }
 }
 /// Screen y of the bar's top edge when it is in place (bottom of the primary monitor, or its top in the tiling style).
 unsafe fn bar_top() -> i32 {
@@ -288,14 +322,14 @@ unsafe fn fly_toggle() {
     FHOT.set(-1);
     let scr = GetSystemMetrics(SM_CXSCREEN);
     let (bx, bw) = bar_x_w();
-    let cx = bx + layout(if vert() { axis_len() } else { bw }).apps.0 + sc(12); // above the chevron
-    SetWindowRgn(w, CreateRoundRectRgn(0, 0, fw + 1, fh + 1, rr(12), rr(12)), 1);
+    let cx = bx + layout(if vert() { axis_len() } else { bw }).apps.0 + tcell() / 2; // above the chevron
+    round_window(w, fw, fh, 12);
     let (x, y) = if vert() { (side_x(fw), (cx - fh / 2).clamp(sc(8), GetSystemMetrics(SM_CYSCREEN) - fh - sc(8))) } else { ((cx - fw / 2).clamp(sc(8), scr - fw - sc(8)), pop_y(fh)) };
     TF_ANIM.set((now_ms(), x, y));
     SetLayeredWindowAttributes(w, 0, 0, LWA_ALPHA); // tf_step fades it in
     SetWindowPos(w, HWND_TOPMOST, x, y + tf_slide(0.0), fw, fh, SWP_SHOWWINDOW);
     InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns with it
-    SetTimer(w, 1, 15, None);
+    SetTimer(w, 1, FRAME, None);
     SetForegroundWindow(w); // so that WM_ACTIVATE tells us when the user clicks elsewhere
 }
 
@@ -328,8 +362,7 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let dc = BeginPaint(hwnd, &mut ps);
             let mut r: RECT = zeroed();
             GetClientRect(hwnd, &mut r);
-            fill(dc, r, pal().line, sc(12));
-            fill(dc, RECT { left: 1, top: 1, right: r.right - 1, bottom: r.bottom - 1 }, pal().bg, sc(12));
+            frame(dc, r, pal().line, sc(12));
             let (cols, _, _) = fly_size();
             let f = tip_font();
             let of = SelectObject(dc, f);
@@ -422,8 +455,7 @@ unsafe extern "system" fn tip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     let dc = BeginPaint(hwnd, &mut ps);
     let mut r: RECT = zeroed();
     GetClientRect(hwnd, &mut r);
-    fill(dc, r, pal().line, sc(8));
-    fill(dc, RECT { left: 1, top: 1, right: r.right - 1, bottom: r.bottom - 1 }, pal().bg, sc(8));
+    frame(dc, r, pal().line, sc(8));
     let f = tip_font();
     let of = SelectObject(dc, f);
     SetBkMode(dc, TRANSPARENT as i32);
@@ -506,7 +538,7 @@ unsafe fn show_tip(s: String, cx: i32) {
     ReleaseDC(tw, dc);
     let (w, h) = (r.right + sc(16), r.bottom + sc(10));
     TIP.set(s);
-    SetWindowRgn(tw, CreateRoundRectRgn(0, 0, w + 1, h + 1, rr(8), rr(8)), 1);
+    round_window(tw, w, h, 8);
     if vert() {
         let y = (cx - h / 2).clamp(sc(4), GetSystemMetrics(SM_CYSCREEN) - h - sc(4));
         SetWindowPos(tw, HWND_TOPMOST, side_x(w), y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -568,7 +600,7 @@ unsafe fn sw_layout(sw: HWND) {
     rects.iter_mut().for_each(|r| *r = RECT { left: r.left + pad, top: r.top + pad, right: r.right + pad, bottom: r.bottom + pad });
     let (w, h) = (tw + 2 * pad, th + 2 * pad);
     SW_CARDS.with_borrow_mut(|(_, ids)| thumbs::unregister(sw, ids));
-    SetWindowRgn(sw, CreateRoundRectRgn(0, 0, w + 1, h + 1, rr(18), rr(18)), 1);
+    round_window(sw, w, h, 18);
     SetWindowPos(sw, HWND_TOPMOST, mon.left + (scr - w) / 2, mon.top + (sch - h) / 2, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     let ids = thumbs::register(sw, &wins, &rects);
     SW_CARDS.set((rects, ids));
@@ -1212,7 +1244,7 @@ fn refresh_buttons() {
             if mine.is_empty() {
                 return None;
             }
-            let id = unsafe { win_meta(w).0 };
+            let id = unsafe { win_id(w) }; // the pin has its own icon: the window's is not asked for
             mine.iter().copied().find(|&i| !id.is_empty() && p[i].aumid == id).or_else(|| mine.iter().copied().find(|&i| id.is_empty() || p[i].aumid.is_empty()))
         });
         match pin {
@@ -1229,7 +1261,7 @@ fn refresh_buttons() {
             // windows of one app share a button (a click then offers the list); generic hosts (Store apps, java...) stay apart (#90)
             // the window's own AppUserModelID is part of the key: a web app installed from Brave runs as brave.exe too (#118, #117)
             let exe = unsafe { exe_of(w) };
-            let key = format!("{exe}|{}", unsafe { win_meta(w).0 });
+            let key = format!("{exe}|{}", unsafe { win_id(w) });
             let same = (!exe.is_empty() && !is_host(&exe)).then(|| keys.iter().position(|k| *k == key)).flatten();
             match same {
                 Some(i) => btns[i].wins.push(w),
@@ -1246,25 +1278,37 @@ fn refresh_buttons() {
 thread_local! {
     // hwnd -> (pid, when read, AppUserModelID, icon): the AUMID is a COM call and a host app's icon up to two 40 ms
     // WM_GETICON round trips, too much for every refresh; re-read after META_TTL (apps set both shortly after start)
-    static META: RefCell<HashMap<usize, (u32, u64, String, HICON)>> = RefCell::new(HashMap::new());
+    static META: RefCell<HashMap<usize, (u32, u64, u64, String, Option<HICON>)>> = RefCell::new(HashMap::new()); // pid, first seen, read at
 }
-const META_TTL: u64 = 4000;
+const META_TTL: u64 = 4000; // while a window is young
+const META_OLD: u64 = 60_000; // once it has been up for a while
 
-unsafe fn win_meta(w: HWND) -> (String, HICON) {
+unsafe fn win_id(w: HWND) -> String {
     let mut pid = 0u32;
     GetWindowThreadProcessId(w, &mut pid);
     let now = now_ms();
-    if let Some(v) = META.with_borrow(|m| m.get(&(w as usize)).filter(|e| e.0 == pid && now.saturating_sub(e.1) < META_TTL).map(|e| (e.2.clone(), e.3))) {
-        return v;
+    let old = META.with_borrow(|m| m.get(&(w as usize)).filter(|e| e.0 == pid).cloned());
+    if let Some(e) = old.as_ref().filter(|e| now.saturating_sub(e.2) < if now.saturating_sub(e.1) > 20_000 { META_OLD } else { META_TTL }) {
+        return e.3.clone();
     }
-    let v = (win_aumid(w), win_icon(w));
+    let id = win_aumid(w);
     META.with_borrow_mut(|m| {
         if m.len() > 512 {
             m.clear(); // closed windows never leave on their own
         }
-        m.insert(w as usize, (pid, now, v.0.clone(), v.1));
+        m.insert(w as usize, (pid, old.map_or(now, |e| e.1), now, id.clone(), None)); // the icon is asked for again too
     });
-    v
+    id
+}
+
+unsafe fn win_meta(w: HWND) -> (String, HICON) {
+    let id = win_id(w);
+    if let Some(ic) = META.with_borrow(|m| m.get(&(w as usize)).and_then(|e| e.4)) {
+        return (id, ic);
+    }
+    let ic = win_icon(w);
+    META.with_borrow_mut(|m| if let Some(e) = m.get_mut(&(w as usize)) { e.4 = Some(ic) });
+    (id, ic)
 }
 
 /// A minimized window that Windows left as a caption stub on the desktop (it sits at the bottom left with its restore /
@@ -1338,16 +1382,16 @@ struct Layout {
 }
 
 fn layout(w: i32) -> Layout {
-    let gap = sc(4);
+    let gap = sc(if airy() { 6 } else { 4 });
     // the Delphos style: date and time on one line, the battery as an icon alone
-    let slim = line_icons() && !vert();
-    let clock = (w - sc(if !slim { 96 } else if unsafe { clock_texts() }.0.len() > 5 { 160 } else { 136 }), w - sc(6));
+    let slim = airy();
+    let clock = (w - sc(if !slim { 96 } else if unsafe { clock_texts() }.0.len() > 5 { 172 } else { 148 }), w - sc(6));
     let bat = BAT.get().0 >= 0;
-    let sys = (clock.0 - sc(4) - sc(if slim { if bat { 148 } else { 114 } } else { 150 + if bat { 66 } else { 0 } }), clock.0 - sc(4));
-    let apps = (sys.0 - sc(24) * tray_count() as i32, sys.0);
+    let sys = (clock.0 - sc(4) - sc(if slim { if bat { 170 } else { 134 } } else { 150 + if bat { 66 } else { 0 } }), clock.0 - sc(4));
+    let apps = (sys.0 - tcell() * tray_count() as i32, sys.0);
     let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
     let n = BTNS.with_borrow(|b| b.len()) as i32 + LEAD; // + the search and Task View slots
-    let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), sc(44 + [-6, 0, 8][i18n::style::bar_size() as usize % 3]));
+    let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), sc(44 + if slim { 2 } else { 0 } + [-6, 0, 8][i18n::style::bar_size() as usize % 3]));
     // centered on search + Start + pins only: opening an unpinned window adds a button on the right instead of shifting Start left
     let fixed = (PINS.with_borrow(|p| p.len()) as i32 + LEAD + 1).min(n);
     // ...but never so far right that the windows' buttons run into the tray: then the whole row shifts left
@@ -1371,11 +1415,11 @@ unsafe fn hit(hwnd: HWND, x: i32, y: i32) -> i32 {
         return CLOCK;
     }
     if x >= l.sys.0 {
-        let d = x - l.sys.0;
-        return if d < sc(42) { LANG } else if d < sc(74) { WIFI_I } else if d < sc(106) { VOL_I } else { BAT_I };
+        let (d, e) = (x - l.sys.0, sys_ends());
+        return if d < sc(e.0) { LANG } else if d < sc(e.1) { WIFI_I } else if d < sc(e.2) || BAT.get().0 < 0 { VOL_I } else { BAT_I };
     }
     if x >= l.apps.0 {
-        return TAPP + (x - l.apps.0) / sc(24);
+        return TAPP + (x - l.apps.0) / tcell();
     }
     let n = BTNS.with_borrow(|b| b.len()) as i32 + LEAD;
     let (d, i) = (x - l.x0, (x - l.x0) / (l.bw + l.gap));
@@ -1418,6 +1462,36 @@ unsafe fn hv(key: i32, on: bool) -> f32 {
     ease(v)
 }
 
+/// A value that glides to `target` (a slider's fill); the first look at a key starts from 0, so a panel's sliders fill as it opens.
+unsafe fn glide(key: i32, target: f32) -> f32 {
+    let now = now_ms();
+    let v = GLIDE.with_borrow_mut(|m| {
+        let e = m.entry(key).or_insert((0.0, now));
+        let dt = now.saturating_sub(e.1).min(50) as f32;
+        e.1 = now;
+        e.0 += (target - e.0) * (1.0 - (-dt / 70.0).exp());
+        if (target - e.0).abs() < 0.003 {
+            e.0 = target;
+        }
+        e.0
+    });
+    if v != target {
+        BUSY.set(true);
+    }
+    v
+}
+
+/// How far the icon of pin `p` is off its place while its app starts: two soft hops a second until a window shows (4 s at most).
+unsafe fn launch_hop(p: usize, up: bool) -> f32 {
+    let (lp, t0) = LAUNCHED.get();
+    let age = now_ms().saturating_sub(t0);
+    if lp != p as i32 || up || age > 4000 {
+        return 0.0;
+    }
+    BUSY.set(true);
+    (age as f32 / 500.0 * std::f32::consts::PI).sin().abs() * sc(5) as f32
+}
+
 /// Rounded highlight that fades in and out; `from` is the colour it sits on. A click also flashes it in the accent colour.
 unsafe fn glow(dc: HDC, key: i32, on: bool, r: RECT, from: u32, to: u32, rad: i32) {
     let t = hv(key, on);
@@ -1429,6 +1503,8 @@ unsafe fn glow(dc: HDC, key: i32, on: bool, r: RECT, from: u32, to: u32, rad: i3
 
 thread_local! {
     static PRESS: Cell<(i32, u64)> = const { Cell::new((i32::MIN, 0)) }; // last clicked element and when
+    static GLIDE: RefCell<HashMap<i32, (f32, u64)>> = RefCell::new(HashMap::new());
+    static LAUNCHED: Cell<(i32, u64)> = const { Cell::new((-1, 0)) }; // the pin started last and when
     static SEEN: RefCell<HashMap<isize, u64>> = RefCell::new(HashMap::new()); // when each taskbar button first showed
 }
 
@@ -1473,7 +1549,7 @@ fn bar_off() -> i32 {
 
 unsafe fn bar_anim(hwnd: HWND) {
     BAR_T.set(now_ms());
-    SetTimer(hwnd, 5, 15, None);
+    SetTimer(hwnd, 5, FRAME, None);
 }
 
 unsafe fn bar_step(hwnd: HWND) {
@@ -1778,7 +1854,7 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
             }
             if i == 0 && line_icons() {
                 SelectObject(dc, f_glyph);
-                sym(dc, START, r, mix(pal().text, pal().accent, th));
+                sym_t(dc, START, r, mix(pal().text, pal().accent, th), th);
                 continue;
             }
             if i == 0 {
@@ -1870,6 +1946,7 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
 
 thread_local! {
     static BG: Cell<(HDC, HBITMAP, u64)> = const { Cell::new((null_mut(), null_mut(), 0)) }; // cached background layer and its key
+    static BACK: Cell<(HDC, HBITMAP, (i32, i32))> = const { Cell::new((null_mut(), null_mut(), (0, 0))) };
     static FONTS: Cell<([HFONT; 4], u64)> = const { Cell::new(([null_mut(); 4], 0)) };
 }
 
@@ -1925,7 +2002,7 @@ unsafe fn bg_layer(wdc: HDC, cr: RECT) -> HDC {
 
 /// The bar's four fonts, made again only when the scale or the style's faces change.
 unsafe fn bar_fonts() -> [HFONT; 4] {
-    let key = key_of((SCALE.get().to_bits(), ui_face(), winrust_common::style::icon_face()));
+    let key = key_of((SCALE.get().to_bits(), ui_face(), winrust_common::style::icon_face(), line_icons()));
     let (fonts, k) = FONTS.get();
     if k == key {
         return fonts;
@@ -1935,9 +2012,28 @@ unsafe fn bar_fonts() -> [HFONT; 4] {
     });
     let (face, gface) = (wide(ui_face()), wide(winrust_common::style::icon_face()));
     let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, 5, 0, f.as_ptr());
-    let fonts = [font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600)];
+    let fonts = [font(&face, 13, 400), font(&face, 12, 400), font(&gface, if line_icons() { 17 } else { 16 }, 400), font(&face, 13, 600)];
     FONTS.set((fonts, key));
     fonts
+}
+
+/// The bar's off-screen bitmap, kept between frames and made again only when the size changes.
+unsafe fn back_buffer(wdc: HDC, w: i32, h: i32) -> HDC {
+    let (mut dc, mut bmp, size) = BACK.get();
+    if !dc.is_null() && size == (w, h) {
+        return dc;
+    }
+    if dc.is_null() {
+        dc = CreateCompatibleDC(wdc);
+    }
+    let old = bmp;
+    bmp = CreateCompatibleBitmap(wdc, w.max(1), h.max(1));
+    SelectObject(dc, bmp);
+    if !old.is_null() {
+        DeleteObject(old);
+    }
+    BACK.set((dc, bmp, (w, h)));
+    dc
 }
 
 unsafe fn paint(hwnd: HWND) {
@@ -1947,8 +2043,7 @@ unsafe fn paint(hwnd: HWND) {
     GetClientRect(hwnd, &mut cr);
     let h = cr.bottom;
     BUSY.set(false);
-    let (dc, bmp) = (CreateCompatibleDC(wdc), CreateCompatibleBitmap(wdc, cr.right, h));
-    let old = SelectObject(dc, bmp);
+    let dc = back_buffer(wdc, cr.right, h);
     // the background (gradient, facets, hairlines) is the same every frame: drawn once per size / style, then copied
     BitBlt(dc, 0, 0, cr.right, h, bg_layer(wdc, cr), 0, 0, SRCCOPY);
     SetBkMode(dc, TRANSPARENT as i32);
@@ -1963,7 +2058,7 @@ unsafe fn paint(hwnd: HWND) {
     }
     let l = layout(cr.right);
     let fg = GetForegroundWindow();
-    let (top, bot) = (sc(4), h - sc(4));
+    let (top, bot) = if line_icons() { (sc(5), h - sc(5)) } else { (sc(4), h - sc(4)) };
     let mid = (top + bot) / 2;
     let cell = |x: i32, w: i32| RECT { left: x, top, right: x + w, bottom: bot };
     let hot = HOT.get();
@@ -1973,7 +2068,7 @@ unsafe fn paint(hwnd: HWND) {
     let gr = RECT { left: sc(GEAR_X.0), top, right: sc(GEAR_X.0 + GEAR_X.1), bottom: bot };
     glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
-    sym(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) });
+    sym_t(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(GEAR, hot == GEAR));
 
     // search button (left of Start)
     let sb = RECT { left: l.x0, top, right: l.x0 + l.bw, bottom: bot };
@@ -2000,7 +2095,7 @@ unsafe fn paint(hwnd: HWND) {
             }
             if i == 0 && line_icons() {
                 SelectObject(dc, f_glyph);
-                sym(dc, START, r, mix(pal().text, pal().accent, th));
+                sym_t(dc, START, r, mix(pal().text, pal().accent, th), th);
                 continue;
             }
             if i == 0 {
@@ -2022,8 +2117,9 @@ unsafe fn paint(hwnd: HWND) {
             let key = b.pin.map(|p| -(p as isize) - 1).or_else(|| b.wins.first().map(|&w| w as isize)).unwrap_or(0);
             // squeezes on click, grows in when new, lifts a pixel on hover
             let isz = (icon_px().min(l.bw - sc(6)) as f32 * (1.0 - 0.18 * tp) * (0.55 + 0.45 * appear(key))) as i32;
+            let lift = if line_icons() { sc(2) as f32 * th + b.pin.map_or(0.0, |p| launch_hop(p, !b.wins.is_empty())) } else { sc(1) as f32 * th };
             if !ic.is_null() {
-                DrawIconEx(dc, x + (l.bw - isz) / 2, mid - isz / 2 - sc(2) - (sc(1) as f32 * th) as i32, ic, isz, isz, 0, null_mut(), DI_NORMAL);
+                DrawIconEx(dc, x + (l.bw - isz) / 2, mid - isz / 2 - sc(2) - lift as i32, ic, isz, isz, 0, null_mut(), DI_NORMAL);
             }
             if !b.wins.is_empty() {
                 let min = b.wins.iter().all(|&w| IsIconic(w) != 0);
@@ -2043,46 +2139,51 @@ unsafe fn paint(hwnd: HWND) {
     fill(dc, RECT { left: l.apps.0 - sc(5), top: mid - sc(9), right: l.apps.0 - sc(5) + 1, bottom: mid + sc(9) }, pal().line, 0);
 
     // tray apps
-    glow(dc, TAPP, hot == TAPP, cell(l.apps.0, sc(24)), pal().bg, pal().hover, sc(8));
+    glow(dc, TAPP, hot == TAPP, cell(l.apps.0, tcell()), pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
     let open_tf = IsWindowVisible(TRAYFLY.get()) != 0;
     let turn = ease(hv(TF_KEY, open_tf)); // the chevron turns over as the flyout opens, and back
-    let cc = cell(l.apps.0, sc(24));
+    let cc = cell(l.apps.0, tcell());
     chevron(dc, (cc.left + cc.right) / 2, mid, sc(if line_icons() { 4 } else { 5 }), if at_top() { 180.0 } else { 0.0 } + 180.0 * turn, mix(icon_ink(), pal().accent, turn));
     SelectObject(dc, f_txt);
     let bar = bar_idx();
     TAPPS.with_borrow(|t| {
         for (k, &ix) in bar.iter().enumerate() {
             let (i, ti) = (k + 1, &t[ix]);
-            let x = l.apps.0 + i as i32 * sc(24);
-            glow(dc, TAPP + i as i32, hot == TAPP + i as i32, cell(x, sc(24)), pal().bg, pal().hover, sc(8));
+            let x = l.apps.0 + i as i32 * tcell();
+            glow(dc, TAPP + i as i32, hot == TAPP + i as i32, cell(x, tcell()), pal().bg, pal().hover, sc(8));
             if !ti.icon.is_null() {
-                DrawIconEx(dc, x + sc(4), mid - sc(8), ti.icon, sc(16), sc(16), 0, null_mut(), DI_NORMAL);
+                DrawIconEx(dc, x + (tcell() - sc(16)) / 2, mid - sc(8), ti.icon, sc(16), sc(16), 0, null_mut(), DI_NORMAL);
             }
         }
     });
 
     // system group: language on its own, then one pill for wifi + volume + battery (like Windows 11: they open one panel)
     let tb = RECT { left: l.sys.0, top, right: l.sys.1, bottom: bot };
-    glow(dc, LANG, hot == LANG, RECT { left: tb.left, top, right: tb.left + sc(42), bottom: bot }, pal().bg, pal().hover, sc(8));
-    let grp = RECT { left: tb.left + sc(44), top, right: tb.right, bottom: bot };
+    glow(dc, LANG, hot == LANG, RECT { left: tb.left, top, right: tb.left + sc(sys_ends().0), bottom: bot }, pal().bg, pal().hover, sc(8));
+    let grp = RECT { left: tb.left + sc(sys_ends().0 + 2), top, right: tb.right, bottom: bot };
     let (tg, pg) = (hv(SYS_GRP, matches!(hot, WIFI_I | VOL_I | BAT_I) || fly::is_open(fly::Kind::Quick)), press_t(WIFI_I).max(press_t(VOL_I)).max(press_t(BAT_I)));
     if tg > 0.01 || pg > 0.0 {
         fill(dc, grp, mix(mix(pal().bg, pal().hover, tg), pal().accent, 0.5 * pg), sc(8));
     }
     let mut x = tb.left + sc(10);
-    text(dc, &lang_name(), cell(x, sc(34)), icon_ink(), DT_LEFT);
+    let at = |n: i32| tb.left + sc(74 + 36 * n); // center of the n-th status icon in the Delphos style
+    if line_icons() {
+        text(dc, &lang_name(), cell(tb.left, sc(sys_ends().0)), icon_ink(), DT_CENTER);
+    } else {
+        text(dc, &lang_name(), cell(x, sc(34)), icon_ink(), DT_LEFT);
+    }
     x += sc(42);
-    net_icon(dc, x + sc(9), mid, sc(17), f_glyph);
+    net_icon(dc, if line_icons() { at(0) } else { x + sc(9) }, mid, sc(17), f_glyph);
     x += sc(32);
     SelectObject(dc, f_glyph);
     let (vol, muted) = VOL.get();
     let vg = vol_glyph(vol, muted);
-    sym(dc, vg, cell(x, sc(22)), if muted { BAD } else { icon_ink() });
+    sym(dc, vg, if line_icons() { cell(at(1) - sc(11), sc(22)) } else { cell(x, sc(22)) }, if muted { BAD } else { icon_ink() });
     x += sc(32);
     let (pct, ac) = BAT.get();
     if pct >= 0 && line_icons() {
-        sym(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, cell(x, sc(22)), if !ac && pct <= 15 { BAD } else { icon_ink() });
+        sym(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, cell(at(2) - sc(11), sc(22)), if !ac && pct <= 15 { BAD } else { icon_ink() });
     } else if pct >= 0 {
         let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
         let (bw, bh, by) = (sc(22), sc(11), mid - sc(5));
@@ -2118,11 +2219,8 @@ unsafe fn paint(hwnd: HWND) {
 
     BitBlt(wdc, 0, 0, cr.right, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, of);
-    SelectObject(dc, old);
-    DeleteObject(bmp);
-    DeleteDC(dc);
     if BUSY.get() {
-        SetTimer(hwnd, 4, 16, None); // next animation frame
+        SetTimer(hwnd, 4, FRAME, None); // next animation frame
     } else {
         KillTimer(hwnd, 4);
     }
@@ -2197,8 +2295,52 @@ unsafe fn open(path: &[u16]) {
     // cannot receive files dragged in from normal windows (UIPI), and PrtSc / Win+Shift+S (ms-screenclip:) do not work
     // when started elevated. With an argument and no explorer shell running, explorer.exe hands the target to its COM
     // host and does not become a shell or raise a taskbar.
+    // With Explorer running, the running one is asked directly: same token, without starting another explorer.exe first.
+    if EXPLORER_UP.load(Relaxed) && shell_open(&p) {
+        return;
+    }
     if Command::new("explorer.exe").arg(&p).spawn().is_err() {
         ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(&p).as_ptr(), null(), null(), SW_SHOWNORMAL);
+    }
+}
+
+/// Asks the running Explorer (its desktop window) to open `p`, so it starts with the desktop user's normal token. false = not possible.
+unsafe fn shell_open(p: &str) -> bool {
+    use windows::{
+        Win32::{
+            System::{Com::{CLSCTX_LOCAL_SERVER, IDispatch, IServiceProvider}, Variant::VARIANT},
+            UI::Shell::{IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellWindows, SID_STopLevelBrowser, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellWindows},
+        },
+        core::BSTR,
+    };
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(GetShellWindow(), &mut pid);
+    if pid == 0 {
+        return false;
+    }
+    AllowSetForegroundWindow(pid); // the new window comes to the front
+    (|| -> windows::core::Result<()> {
+        let sw: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER)?;
+        let (desktop, none) = (VARIANT::from(0i32), VARIANT::default()); // 0 = CSIDL_DESKTOP
+        let mut h = 0i32;
+        let d: IDispatch = sw.FindWindowSW(&desktop, &none, SWC_DESKTOP, &mut h, SWFO_NEEDDISPATCH)?;
+        let browser: IShellBrowser = d.cast::<IServiceProvider>()?.QueryService(&SID_STopLevelBrowser)?;
+        let view: IDispatch = browser.QueryActiveShellView()?.GetItemObject(SVGIO_BACKGROUND)?;
+        let app: IShellDispatch2 = view.cast::<IShellFolderViewDual>()?.Application()?.cast()?;
+        app.ShellExecute(&BSTR::from(p), &none, &none, &none, &none)
+    })()
+    .is_ok()
+}
+
+/// The logon task starts the bar below normal priority (the Task Scheduler's default), with slow disk and memory priority, and
+/// every app started from it inherits that: back to normal.
+unsafe fn normal_priority() {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, NORMAL_PRIORITY_CLASS, SetPriorityClass};
+    SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
+    if let Some(f) = GetProcAddress(GetModuleHandleW(wide("ntdll.dll").as_ptr()), c"NtSetInformationProcess".as_ptr() as *const u8) {
+        let f: unsafe extern "system" fn(HANDLE, u32, *const u32, u32) -> i32 = std::mem::transmute(f);
+        f(GetCurrentProcess(), 33, &2, 4); // ProcessIoPriority: normal
+        f(GetCurrentProcess(), 39, &5, 4); // ProcessPagePriority: normal
     }
 }
 
@@ -2695,7 +2837,13 @@ unsafe fn click(h: i32, left: bool, mid: bool) {
                 // not running: launch the pinned app (a Store app may have updated since the pins were loaded)
                 (None, true) => lnk.iter().for_each(|l| {
                     PINS.with_borrow_mut(|p| p.iter_mut().filter(|x| x.lnk == *l).for_each(|x| x.target = fix_msix_pin(l, &x.target).unwrap_or(std::mem::take(&mut x.target))));
-                    open(l)
+                    LAUNCHED.set((PINS.with_borrow(|p| p.iter().position(|x| x.lnk == *l)).map_or(-1, |i| i as i32), now_ms()));
+                    // off the bar's thread: finding a Store app's id lists every installed app (seconds on some machines)
+                    let l = l.clone();
+                    thread::spawn(move || {
+                        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                        open(&l);
+                    });
                 }),
                 (Some(&w), false) => close_window(w), // right / middle click
                 // several windows of one app: pick which one (the same list the right-click menu opens with)
@@ -2704,10 +2852,10 @@ unsafe fn click(h: i32, left: bool, mid: bool) {
                     // like the Windows taskbar: the active app's button minimizes it, a minimized one restores, any other raises
                     let fg = GetForegroundWindow();
                     if wins.contains(&fg) && IsIconic(fg) == 0 {
-                        ShowWindow(fg, SW_MINIMIZE);
+                        ShowWindowAsync(fg, SW_MINIMIZE); // never wait for the app: a busy one would freeze the bar
                     } else {
                         if IsIconic(w) != 0 {
-                            ShowWindow(w, SW_RESTORE);
+                            ShowWindowAsync(w, SW_RESTORE);
                         }
                         SetForegroundWindow(w);
                     }
@@ -2753,11 +2901,11 @@ unsafe fn tip_cx(l: &Layout, h: i32) -> i32 {
         TASKVIEW => l.x0 + (l.bw + l.gap) + l.bw / 2,
         CLOCK => (l.clock.0 + l.clock.1) / 2,
         SHOWDESK => l.clock.1 + sc(3),
-        LANG => l.sys.0 + sc(21),
-        WIFI_I => l.sys.0 + sc(58),
-        VOL_I => l.sys.0 + sc(90),
-        BAT_I => l.sys.0 + sc(130),
-        t if (TAPP..TAPP + 100).contains(&t) => l.apps.0 + (t - TAPP) * sc(24) + sc(12),
+        LANG => l.sys.0 + sc(sys_ends().0 / 2),
+        WIFI_I => l.sys.0 + sc(sys_ends().1 - 17),
+        VOL_I => l.sys.0 + sc(sys_ends().2 - 17),
+        BAT_I => l.sys.0 + sc(sys_ends().2 + 18),
+        t if (TAPP..TAPP + 100).contains(&t) => l.apps.0 + (t - TAPP) * tcell() + tcell() / 2,
         i => l.x0 + (i + LEAD) * (l.bw + l.gap) + l.bw / 2,
     }
 }
@@ -2958,18 +3106,8 @@ unsafe fn preview_bar() {
         }
         DefWindowProcW(h, m, w, l)
     }
-    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-    let dc = GetDC(null_mut());
-    SCALE.set(GetDeviceCaps(dc, LOGPIXELSX as i32) as f32 / 96.0);
-    ReleaseDC(null_mut(), dc);
     load_pins();
     refresh_buttons();
-    read_volume();
-    read_wifi();
-    let mut s: SYSTEM_POWER_STATUS = zeroed();
-    if GetSystemPowerStatus(&mut s) != 0 && s.BatteryFlag & 128 == 0 && s.BatteryLifePercent <= 100 {
-        BAT.set((s.BatteryLifePercent as i32, s.ACLineStatus == 1));
-    }
     let class = wide("topbar_previewbar");
     let hi = GetModuleHandleW(null());
     RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hi, lpszClassName: class.as_ptr(), ..zeroed() });
@@ -2993,18 +3131,30 @@ fn main() {
             screenshot();
             return;
         }
-        // `topbar --preview quick|wifi|bar`: one flyout (or the bar, painted only) on its own (no bar, no hooks), to look at a style change; the process is closed by hand
+        // `topbar --preview quick|wifi|cal|menu|bar`: one flyout (or the bar, painted only) on its own (no bar, no hooks), to look at a style change; the process is closed by hand
         if let Some(p) = std::env::args().skip_while(|a| a != "--preview").nth(1) {
             SetProcessDPIAware();
             let (mut tok, mut inp): (usize, GdiplusStartupInput) = (0, zeroed());
             inp.GdiplusVersion = 1;
             GdiplusStartup(&mut tok, &inp, null_mut());
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let dc = GetDC(null_mut());
+            SCALE.set(GetDeviceCaps(dc, LOGPIXELSX as i32) as f32 / 96.0);
+            ReleaseDC(null_mut(), dc);
+            read_volume();
+            read_wifi();
+            let mut s: SYSTEM_POWER_STATUS = zeroed();
+            if GetSystemPowerStatus(&mut s) != 0 && s.BatteryFlag & 128 == 0 && s.BatteryLifePercent <= 100 {
+                BAT.set((s.BatteryLifePercent as i32, s.ACLineStatus == 1));
+            }
             fly::init(GetModuleHandleW(null()));
             fly::PREVIEW.store(true, Relaxed);
-            if p == "bar" {
-                preview_bar();
-            } else {
-                fly::toggle(if p == "wifi" { fly::Kind::Wifi } else { fly::Kind::Quick });
+            match p.as_str() {
+                "bar" => preview_bar(),
+                "wifi" => fly::toggle(fly::Kind::Wifi),
+                "cal" => fly::toggle(fly::Kind::Cal),
+                "menu" => style_menu(),
+                _ => fly::toggle(fly::Kind::Quick),
             }
             let mut msg: MSG = zeroed();
             while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
@@ -3013,6 +3163,7 @@ fn main() {
             }
             return;
         }
+        normal_priority();
         // Atomic single-instance guard (FindWindow alone raced when two launchers started us at once); the handle lives until exit.
         let m = windows_sys::Win32::System::Threading::CreateMutexW(null(), 0, wide("Local\\topbar-single").as_ptr());
         if m.is_null() || GetLastError() == ERROR_ALREADY_EXISTS || !FindWindowW(wide("topbar").as_ptr(), null()).is_null() {

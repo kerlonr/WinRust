@@ -97,6 +97,7 @@ thread_local! {
     static FLY: Cell<Option<Kind>> = const { Cell::new(None) };
     static FH: Cell<HWND> = const { Cell::new(null_mut()) };
     static DEACT: Cell<(Option<Kind>, u64)> = const { Cell::new((None, 0)) }; // panel closed by losing focus, and when
+    static CAL_TURN: Cell<(i32, u64)> = const { Cell::new((0, 0)) }; // the month turned last: which way and when
     static CAL: Cell<(i32, i32)> = const { Cell::new((2026, 1)) };
     static NETS: RefCell<Vec<Net>> = const { RefCell::new(Vec::new()) };
     static CONN: RefCell<Option<Conn>> = const { RefCell::new(None) };
@@ -623,6 +624,7 @@ unsafe fn wifi_join(n: &Net, pass: &str) {
 
 fn size(k: Kind) -> (i32, i32) {
     match k {
+        Kind::Quick if line_icons() => (344, 226 + 40 * sliders()),
         Kind::Quick => (360, 252 + 44 * sliders()),
         Kind::Cal => (330, 340),
         Kind::Wifi => (360, wifi_rows().2),
@@ -688,6 +690,21 @@ fn r(l: i32, t: i32, rr: i32, b: i32) -> RECT {
 fn rects(k: Kind) -> Vec<(RECT, Act)> {
     let (w, h) = size(k);
     match k {
+        Kind::Quick if line_icons() => {
+            // two wide tiles, then four small ones with a caption under each
+            let mut v: Vec<_> = (0..2).map(|i| (r(16 + 160 * i, 16, 168 + 160 * i, 78), Act::Tile(i as u8))).collect();
+            v.push((r(136, 33, 164, 61), Act::WifiMore));
+            v.extend((0..4).map(|i| (r(16 + 80 * i, 88, 88 + 80 * i, 134), Act::Tile(2 + i as u8))));
+            let mut y = 164;
+            if BRIGHT.load(Relaxed) >= 0 {
+                v.push((r(50, y, w - 58, y + 40), Act::BrightSlide));
+                y += 40;
+            }
+            v.push((r(14, y + 2, 50, y + 38), Act::Mute));
+            v.push((r(50, y, w - 58, y + 40), Act::VolSlide));
+            v.push((r(w - 50, h - 48, w - 14, h - 12), Act::Settings("ms-settings:")));
+            v
+        }
         Kind::Quick => {
             // a 3x2 grid of tiles; the Wi-Fi tile has a round "more" button in its corner (found first: act_at searches backwards)
             let mut v = vec![];
@@ -878,7 +895,7 @@ pub fn close() {
         GHOST.set((h, now_ms(), FIN.get()));
         KillTimer(h, 1);
         KillTimer(h, 2);
-        SetTimer(h, 3, 15, None);
+        SetTimer(h, 3, FRAME, None);
     }
 }
 
@@ -900,7 +917,7 @@ unsafe fn anim_step(hw: HWND) {
     let now = now_ms();
     let (g, gt0, gpos) = GHOST.get();
     if hw == g {
-        let t = (now.saturating_sub(gt0) as f32 / 150.0).min(1.0);
+        let t = (now.saturating_sub(gt0) as f32 / if line_icons() { 130.0 } else { 150.0 }).min(1.0);
         let q = t * t;
         SetLayeredWindowAttributes(hw, 0, ((1.0 - q) * 255.0) as u8, LWA_ALPHA);
         SetWindowPos(hw, null_mut(), gpos.0, gpos.1 + (q * sc(10) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -908,11 +925,11 @@ unsafe fn anim_step(hw: HWND) {
             kill_ghost();
         }
     } else if hw == FH.get() {
-        let t = (now.saturating_sub(T0.get()) as f32 / 220.0).min(1.0);
-        let p = 1.0 - (1.0 - t).powi(3);
+        let t = (now.saturating_sub(T0.get()) as f32 / if line_icons() { 320.0 } else { 220.0 }).min(1.0);
+        let p = 1.0 - (1.0 - t).powi(if line_icons() { 5 } else { 3 });
         SetLayeredWindowAttributes(hw, 0, (p * 255.0) as u8, LWA_ALPHA);
         let (x, y) = FIN.get();
-        SetWindowPos(hw, null_mut(), x, y + ((1.0 - p) * sc(14) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(hw, null_mut(), x, y + ((1.0 - p) * sc(if line_icons() { 24 } else { 14 }) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         if t >= 1.0 {
             KillTimer(hw, 3);
         }
@@ -943,6 +960,8 @@ pub fn toggle(k: Kind) {
     close();
     unsafe {
         HV.with_borrow_mut(|m| m.retain(|k, _| *k < 1_000_000)); // flyout keys are >= 1_000_000: no stale glow from the last panel
+        GLIDE.with_borrow_mut(|m| m.clear());
+        CAL_TURN.set((0, 0));
         CTX.set(None);
         QUERY.set(String::new());
         SELALL.set(false);
@@ -991,13 +1010,13 @@ pub fn toggle(k: Kind) {
         }
         FIN.set((x, fy));
         T0.set(now_ms());
-        SetWindowRgn(hw, CreateRoundRectRgn(0, 0, w + 1, h + 1, rr(16), rr(16)), 1);
+        round_window(hw, w, h, 16);
         FH.set(hw);
         FLY.set(Some(k));
         ShowWindow(hw, SW_SHOW);
         force_fg(hw);
         SetTimer(hw, 1, 1000, None);
-        SetTimer(hw, 3, 15, None);
+        SetTimer(hw, 3, FRAME, None);
     }
 }
 
@@ -1138,6 +1157,7 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
             m += if a == Act::CalNext { 1 } else { -1 };
             (y, m) = if m < 1 { (y - 1, 12) } else if m > 12 { (y + 1, 1) } else { (y, m) };
             CAL.set((y, m));
+            CAL_TURN.set((if a == Act::CalNext { 1 } else { -1 }, now_ms()));
         }
         Act::CalToday => {
             let mut t: SYSTEMTIME = zeroed();
@@ -1247,8 +1267,42 @@ unsafe fn track(dc: HDC, rc: RECT, frac: f32) {
     fill(dc, RECT { left: x - kr, top: m - kr, right: x + kr, bottom: m + kr }, if style().light() { rgb(255, 255, 255) } else { mix(pal().text, card(), 0.04) }, 2 * kr);
 }
 
+const TILE_KEY: i32 = 1_600_000; // animation keys of the Delphos quick panel
+
+/// Opening progress 0..1 of the `n`-th part of a panel: each starts 28 ms after the previous one. 1 in the other styles.
+unsafe fn rise(n: i32) -> f32 {
+    if !line_icons() {
+        return 1.0;
+    }
+    let t = ((now_ms().saturating_sub(T0.get()) as f32 - 28.0 * n as f32) / 300.0).clamp(0.0, 1.0);
+    if t < 1.0 {
+        BUSY.set(true);
+    }
+    1.0 - (1.0 - t).powi(4)
+}
+
+/// `rc` as far below its place as progress `t` leaves it.
+fn drop_by(rc: RECT, t: f32) -> RECT {
+    let d = ((1.0 - t) * sc(14) as f32) as i32;
+    RECT { top: rc.top + d, bottom: rc.bottom + d, ..rc }
+}
+
+/// The Delphos slider: a thin line with a knob that grows under the pointer.
+unsafe fn thin_track(dc: HDC, rc: RECT, frac: f32, grab: f32, seen: f32) {
+    let (l, rr, m, th) = (rc.left + sc(8), rc.right - sc(8), (rc.top + rc.bottom) / 2, sc(2));
+    let c = |c: u32| mix(pal().bg, c, seen);
+    fill(dc, RECT { left: l, top: m - th, right: rr, bottom: m + th }, c(mix(pal().bg, pal().text, 0.14)), 2 * th);
+    let x = l + ((rr - l) as f32 * frac.clamp(0.0, 1.0)) as i32;
+    fill(dc, RECT { left: l, top: m - th, right: x.max(l + 2 * th), bottom: m + th }, c(pal().accent), 2 * th);
+    let kr = sc(6) + (sc(2) as f32 * grab) as i32;
+    fill(dc, RECT { left: x - kr, top: m - kr, right: x + kr, bottom: m + kr }, c(pal().text), 2 * kr);
+}
+
 /// A raised rounded surface: a hairline edge (a soft shadow on the light style) around `base`.
 unsafe fn surface(dc: HDC, rc: RECT, base: u32, rad: i32) {
+    if line_icons() {
+        return fill(dc, rc, base, rad); // flat
+    }
     let light = style().light();
     if light {
         fill(dc, RECT { top: rc.top + sc(1), bottom: rc.bottom + sc(2), ..rc }, mix(pal().bg, pal().dim, 0.16), rad);
@@ -1269,14 +1323,14 @@ unsafe fn paint(hw: HWND, k: Kind) {
     BUSY.set(false);
     let (dc, bmp) = (CreateCompatibleDC(wdc), CreateCompatibleBitmap(wdc, cr.right, cr.bottom));
     let old = SelectObject(dc, bmp);
-    fill(dc, cr, if style().light() { mix(pal().bg, pal().dim, 0.3) } else { mix(pal().bg, pal().text, 0.12) }, sc(16));
-    fill(dc, inset(cr, 1), pal().bg, sc(16));
+    frame(dc, cr, if style().light() { mix(pal().bg, pal().dim, 0.3) } else { mix(pal().bg, pal().text, 0.12) }, sc(16));
     winrust_common::style::backdrop(dc, inset(cr, 1), sc(100) as f32 / 100.0);
     SetBkMode(dc, TRANSPARENT as i32);
     let (face, gface) = (wide(ui_face()), wide(winrust_common::style::icon_face()));
     let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, 5, 0, f.as_ptr());
     let (f_txt, f_small, f_glyph, f_title, f_big) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 15, 600), font(&face, 34, 600));
     let (f_semi, f_head, f_gs, f_label) = (font(&face, 13, 600), font(&face, 18, 700), font(&gface, 11, 400), font(&face, 12, 600));
+    let f_cap = font(&face, 11, 400);
     let card = card();
     let of = SelectObject(dc, f_txt);
     let (w, h) = size(k);
@@ -1287,6 +1341,116 @@ unsafe fn paint(hw: HWND, k: Kind) {
     let (vol, muted) = VOL.get();
 
     match k {
+        // the Delphos quick panel: flat tiles, thin sliders, no cards inside cards; its parts rise in one after another
+        Kind::Quick if line_icons() => {
+            let rs = rects(k);
+            let q = WIFI.get();
+            let ssid = NETS.with_borrow(|n| n.iter().find(|n| n.connected).map(|n| n.ssid.clone()));
+            let wsub = match (q >= 0, ssid) {
+                (true, Some(s)) => s,
+                (true, None) => t!("Подключено", "Connected", ja: "接続済み", pt: "Conectado", zh: "已连接").into(),
+                _ if NETS.with_borrow(|n| n.is_empty()) => t!("Выключен", "Off", ja: "オフ", pt: "Desligado", zh: "关").into(),
+                _ => t!("Не подключено", "Not connected", ja: "未接続", pt: "Não conectado", zh: "未连接").into(),
+            };
+            let (bt, air, acc, eco) = (crate::quick::bluetooth(), crate::quick::airplane(), crate::quick::accessibility_on(), crate::quick::energy_saver());
+            let bsub = match bt {
+                Some(true) => t!("Вкл.", "On", ja: "オン", pt: "Ligado", zh: "开"),
+                Some(false) => t!("Выкл.", "Off", ja: "オフ", pt: "Desligado", zh: "关"),
+                None => t!("Нет", "None", ja: "なし", pt: "Nenhum", zh: "无"),
+            };
+            let states = [q >= 0, bt == Some(true), air == Some(true), acc, eco, false];
+            let glyphs = ["", "\u{E702}", "\u{E709}", "\u{E776}", "\u{E945}", "\u{E7F0}"];
+            let captions = [
+                "",
+                "",
+                t!("Авиа", "Airplane", ja: "機内", pt: "Avião", zh: "飞行"),
+                t!("Доступ", "Access", ja: "補助", pt: "Acesso", zh: "辅助"),
+                t!("Энергия", "Energy", ja: "省エネ", pt: "Economia", zh: "节能"),
+                t!("Субтитры", "Captions", ja: "字幕", pt: "Legendas", zh: "字幕"),
+            ];
+            for i in 0..6usize {
+                let t = rise(i as i32);
+                let rc = drop_by(rs.iter().find(|(_, a)| *a == Act::Tile(i as u8)).unwrap().0, t);
+                let key = TILE_KEY + i as i32;
+                let (th, on, p) = (hv(key, hot(Act::Tile(i as u8))), hv(key + 50, states[i]), press_t(key));
+                let base = mix(mix(pal().bg, pal().text, 0.055 + 0.04 * th), mix(pal().bg, pal().accent, 0.2 + 0.06 * th), on);
+                let seen = |c: u32| mix(pal().bg, c, t);
+                let body = inset(rc, (p * sc(3) as f32) as i32);
+                fill(dc, body, seen(base), sc(24));
+                let ink = seen(mix(mix(pal().dim, pal().text, 0.75), pal().accent, on));
+                if i >= 2 {
+                    SelectObject(dc, f_glyph);
+                    sym(dc, glyphs[i], body, ink);
+                    SelectObject(dc, f_cap);
+                    text(dc, captions[i], RECT { left: rc.left - sc(4), right: rc.right + sc(4), top: rc.bottom + sc(3), bottom: rc.bottom + sc(19) }, seen(pal().dim), DT_CENTER);
+                    continue;
+                }
+                let icon = RECT { left: rc.left + sc(8), right: rc.left + sc(40), ..rc };
+                let mut right = rc.right - sc(10);
+                if i == 0 {
+                    let mid = (rc.top + rc.bottom) / 2;
+                    wifi_glyph(dc, (icon.left + icon.right) / 2, mid - sc(1), sc(14), if q >= 0 { arcs_lit(q) } else { 0 }, ink, mix(ink, seen(base), 0.6), 0);
+                    let more = drop_by(rs.iter().find(|(_, a)| *a == Act::WifiMore).unwrap().0, t);
+                    let tm = hv(key + 20, hot(Act::WifiMore));
+                    if tm > 0.01 {
+                        fill(dc, more, seen(mix(base, mix(base, pal().text, 0.12), tm)), sc(28));
+                    }
+                    SelectObject(dc, f_gs);
+                    sym(dc, "\u{E76C}", RECT { left: more.left + (tm * sc(3) as f32) as i32, right: more.right + (tm * sc(3) as f32) as i32, ..more }, seen(mix(pal().dim, pal().text, tm)));
+                    right = more.left;
+                } else {
+                    SelectObject(dc, f_glyph);
+                    sym(dc, glyphs[i], icon, ink);
+                }
+                let mid = (rc.top + rc.bottom) / 2;
+                SelectObject(dc, f_semi);
+                text(dc, if i == 0 { "Wi‑Fi" } else { "Bluetooth" }, RECT { left: rc.left + sc(46), right, top: mid - sc(18), bottom: mid }, seen(pal().text), DT_LEFT);
+                SelectObject(dc, f_small);
+                text(dc, if i == 0 { wsub.as_str() } else { bsub }, RECT { left: rc.left + sc(46), right, top: mid, bottom: mid + sc(17) }, seen(pal().dim), DT_LEFT);
+            }
+            let bright = BRIGHT.load(Relaxed);
+            let mut y = 164;
+            for (n, (slider, glyph, value, off)) in [
+                (Act::BrightSlide, "\u{E706}", bright as f32 / 100.0, false),
+                (Act::VolSlide, vol_glyph(vol, muted), if muted { 0.0 } else { vol.max(0) as f32 / 100.0 }, muted),
+            ].into_iter().enumerate() {
+                if n == 0 && bright < 0 {
+                    continue;
+                }
+                let t = rise(6 + n as i32);
+                let seen = |c: u32| mix(pal().bg, c, t);
+                let d = ((1.0 - t) * 14.0) as i32;
+                if n == 1 {
+                    g(Act::Mute, r(16, y + 4, 48, y + 36), pal().bg, mix(pal().bg, pal().text, 0.08), sc(32));
+                }
+                SelectObject(dc, f_glyph);
+                sym(dc, glyph, r(16, y + d, 48, y + 40 + d), seen(if off { BAD } else { mix(pal().dim, pal().text, 0.7) }));
+                // under a drag the fill sticks to the pointer, otherwise it glides
+                let shown = if DRAG.get() == 2 - n as u8 { GLIDE.with_borrow_mut(|m| m.insert(TILE_KEY + 80 + n as i32, (value, now_ms()))); value } else { glide(TILE_KEY + 80 + n as i32, value) };
+                let rc = drop_by(rs.iter().find(|(_, a)| *a == slider).unwrap().0, t);
+                let grab = hv(TILE_KEY + 90 + n as i32, hot(slider) || DRAG.get() == 2 - n as u8);
+                thin_track(dc, rc, shown, grab, t);
+                SelectObject(dc, f_small);
+                text(dc, &format!("{}%", (shown * 100.0).round() as i32), r(w - 60, y + d, w - 18, y + 40 + d), seen(pal().dim), DT_RIGHT);
+                y += 40;
+            }
+            // footer: battery on the left, settings on the right
+            let t = rise(8);
+            let seen = |c: u32| mix(pal().bg, c, t);
+            fill(dc, RECT { left: sc(16), right: sc(w - 16), top: sc(h - 57), bottom: sc(h - 57) + 1 }, seen(pal().line), 0);
+            let (pct, ac) = BAT.get();
+            if pct >= 0 {
+                SelectObject(dc, f_glyph);
+                sym(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, r(16, h - 48, 48, h - 12), seen(if !ac && pct <= 15 { BAD } else { mix(pal().dim, pal().text, 0.7) }));
+                SelectObject(dc, f_small);
+                let s = if ac { format!("{pct}% · {}", t!("заряжается", "charging", ja: "充電中", pt: "na tomada", zh: "充电中")) } else { format!("{pct}%") };
+                text(dc, &s, r(54, h - 48, w - 64, h - 12), seen(pal().dim), DT_LEFT);
+            }
+            let (gear, ga) = *rs.iter().find(|(_, a)| matches!(a, Act::Settings(_))).unwrap();
+            g(ga, gear, pal().bg, mix(pal().bg, pal().text, 0.08), sc(36));
+            SelectObject(dc, f_glyph);
+            sym_t(dc, "\u{E713}", gear, seen(mix(pal().dim, pal().text, 0.7)), hv(TILE_KEY + 40, hot(ga)));
+        }
         Kind::Quick => {
             let rs = rects(k);
             let q = WIFI.get();
@@ -1396,12 +1560,30 @@ unsafe fn paint(hw: HWND, k: Kind) {
             SelectObject(dc, f_txt);
             for d in 1..=dim {
                 let (col, row) = ((first + d - 1) % 7, (first + d - 1) / 7);
-                let cell = r(18 + 42 * col, 84 + 40 * row, 60 + 42 * col, 120 + 40 * row);
+                let mut cell = r(18 + 42 * col, 84 + 40 * row, 60 + 42 * col, 120 + 40 * row);
                 let today = now.wYear as i32 == y && now.wMonth as i32 == m && now.wDay as i32 == d;
-                if today {
+                let mut ink = pal().text;
+                if line_icons() {
+                    // weeks rise in on opening; a turned month slides in from its side
+                    let (dir, t0) = CAL_TURN.get();
+                    let st = if dir == 0 { 1.0 } else { (now_ms().saturating_sub(t0) as f32 / 240.0).min(1.0) };
+                    if st < 1.0 {
+                        BUSY.set(true);
+                    }
+                    let (st, t) = (1.0 - (1.0 - st).powi(3), rise(row));
+                    let dx = ((1.0 - st) * (dir * sc(28)) as f32) as i32;
+                    cell = drop_by(RECT { left: cell.left + dx, right: cell.right + dx, ..cell }, t);
+                    let dayc = if col >= 5 { pal().dim } else { pal().text };
+                    ink = mix(pal().bg, if today { pal().bg } else { dayc }, t * st);
+                    if today {
+                        let (cx, cy, rad) = ((cell.left + cell.right) / 2, (cell.top + cell.bottom) / 2, sc(16));
+                        fill(dc, RECT { left: cx - rad, top: cy - rad, right: cx + rad, bottom: cy + rad }, mix(pal().bg, pal().accent, t * st), 2 * rad);
+                    }
+                } else if today {
                     fill(dc, cell, pal().accent, sc(18));
+                    ink = pal().bg;
                 }
-                text(dc, &d.to_string(), cell, if today { pal().bg } else { pal().text }, DT_CENTER);
+                text(dc, &d.to_string(), cell, ink, DT_CENTER);
             }
         }
         Kind::Wifi => {
@@ -1476,11 +1658,13 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     }
                     // the connected network on its own card, the others together on one, split by hairlines
                     let others: Vec<usize> = (0..nets.len()).filter(|&i| !nets[i].connected).collect();
-                    if let (Some(&a), Some(&b)) = (others.first(), others.last()) {
+                    if let (Some(&a), Some(&b), false) = (others.first(), others.last(), line_icons()) {
                         surface(dc, r(12, rows[a].0, w - 12, rows[b].1), card, sc(14));
                     }
                     for (i, n) in nets.iter().enumerate() {
-                        let rc = rs[i].0;
+                        let rc = drop_by(rs[i].0, rise(i as i32));
+                        // in the Delphos style the list lies flat on the panel, only the connected network has a tinted card
+                        let card = if !line_icons() { card } else if n.connected { mix(pal().bg, pal().accent, 0.12) } else { pal().bg };
                         // rows fade in one after another when the panel opens
                         let t = ease(((age - 40.0 * i as f32) / 220.0).clamp(0.0, 1.0));
                         if t < 1.0 {
@@ -1490,11 +1674,11 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         let busy = joining.as_deref() == Some(n.ssid.as_str());
                         if n.connected {
                             surface(dc, rc, card, sc(14));
-                        } else if others.last() != Some(&i) {
+                        } else if others.last() != Some(&i) && !line_icons() {
                             fill(dc, RECT { left: rc.left + sc(48), top: rc.bottom - 1, right: rc.right - sc(14), bottom: rc.bottom }, mix(card, pal().text, 0.08), 0);
                         }
                         let open = hot(Act::Net(i)) || (n.connected && hot(Act::NetOff));
-                        g(Act::Net(i), RECT { left: rc.left + sc(4), top: rc.top + sc(4), right: rc.right - sc(4), bottom: rc.bottom - sc(4) }, card, mix(card, pal().text, 0.045), sc(10));
+                        glow(dc, 1_710_000 + i as i32, hot(Act::Net(i)), RECT { left: rc.left + sc(4), top: rc.top + sc(4), right: rc.right - sc(4), bottom: rc.bottom - sc(4) }, card, mix(card, pal().text, 0.045), sc(10));
                         // signal arcs; while joining they sweep up one after another
                         let lit = if busy { BUSY.set(true); (now / 230 % 4) as i32 } else { arcs_lit(n.q) };
                         let online = !matches!(state, Link::NoInternet(_));
@@ -1564,7 +1748,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             if let Some(&(lr, la)) = rs.iter().find(|(_, a)| matches!(a, Act::Settings(_))) {
                 g(la, lr, pal().bg, mix(pal().bg, pal().text, 0.05), sc(10));
                 SelectObject(dc, f_txt);
-                text(dc, t!("Параметры сети", "Network settings", ja: "ネットワーク設定", pt: "Configurações de rede", zh: "网络设置"), RECT { left: lr.left + sc(8), ..lr }, pal().accent, DT_LEFT);
+                text(dc, t!("Параметры сети", "Network settings", ja: "ネットワーク設定", pt: "Configurações de rede", zh: "网络设置"), RECT { left: lr.left + sc(8), ..lr }, if line_icons() { mix(pal().dim, pal().text, hv(TILE_KEY + 41, hot(la))) } else { pal().accent }, DT_LEFT);
                 SelectObject(dc, f_gs);
                 sym(dc, "\u{E76C}", RECT { left: lr.right - sc(34), ..lr }, pal().dim); // chevron right
             }
@@ -1623,11 +1807,12 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 for (rc, a) in rs.iter() {
                     let Act::Menu(i) = *a else { continue };
                     let it = &items[i as usize];
+                    let rc = &drop_by(*rc, rise(i as i32 / 2));
                     if it.sep {
                         fill(dc, RECT { left: rc.left + sc(6), top: rc.top - sc(5), right: rc.right - sc(6), bottom: rc.top - sc(5) + 1 }, pal().line, 0);
                     }
                     let col = if it.danger { BAD } else { pal().text };
-                    g(*a, *rc, pal().bg, if it.danger { mix(pal().bg, BAD, 0.22) } else { pal().hover }, sc(8));
+                    glow(dc, 1_700_000 + i as i32, hot(*a), *rc, pal().bg, if it.danger { mix(pal().bg, BAD, 0.22) } else { pal().hover }, sc(8));
                     // plain text rows: a window's own icon is the only picture; the current choice gets an accent dot
                     let mut lx = rc.left + sc(14);
                     if !it.icon.is_null() {
@@ -1745,14 +1930,14 @@ unsafe fn paint(hw: HWND, k: Kind) {
 
     BitBlt(wdc, 0, 0, cr.right, cr.bottom, dc, 0, 0, SRCCOPY);
     SelectObject(dc, of);
-    for f in [f_txt, f_small, f_glyph, f_title, f_big, f_semi, f_head, f_gs, f_label] {
+    for f in [f_txt, f_small, f_glyph, f_title, f_big, f_semi, f_head, f_gs, f_label, f_cap] {
         DeleteObject(f);
     }
     SelectObject(dc, old);
     DeleteObject(bmp);
     DeleteDC(dc);
     if BUSY.get() {
-        SetTimer(hw, 2, 16, None); // next animation frame
+        SetTimer(hw, 2, FRAME, None); // next animation frame
     } else {
         KillTimer(hw, 2);
     }
@@ -1805,7 +1990,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 let y = pop_y(h);
                 FIN.set((x, y));
                 SetWindowPos(hw, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-                SetWindowRgn(hw, CreateRoundRectRgn(0, 0, w + 1, h + 1, rr(16), rr(16)), 1);
+                round_window(hw, w, h, 16);
             }
             InvalidateRect(hw, null(), 0);
         }
@@ -1826,6 +2011,9 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             if CTX.with_borrow(|c| c.is_some()) && !matches!(hit, Some((_, Act::Ctx(_)))) {
                 CTX.set(None); // a click beside the open menu only closes it
             } else if let Some((rc, a)) = hit {
+                if let Act::Tile(i) = a {
+                    press(TILE_KEY + i as i32);
+                }
                 run_act(a, rc, x);
             }
             if FLY.get().is_some() {
