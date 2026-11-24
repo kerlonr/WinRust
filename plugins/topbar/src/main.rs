@@ -22,6 +22,7 @@ use winrust_common::style::{Style, card, on_accent, pal, rgb, style, ui_face};
 mod clip;
 mod icons;
 mod fly;
+mod glass;
 mod quick;
 mod tray;
 mod status;
@@ -260,11 +261,22 @@ fn sc(v: i32) -> i32 {
 }
 fn bar_h() -> i32 {
     let d = [-6, 0, 8][i18n::style::bar_size() as usize % 3]; // small / normal / large
-    if vert() { sc(60 + d) } else { sc(BAR_H + d + if line_icons() { 8 } else { 0 }) }
+    if vert() { sc(60 + d) } else { sc(BAR_H + d + if line_icons() { 8 } else { 0 }) + float_gap() }
 }
 /// The roomier spacing of the Delphos style (bottom bar only).
 fn airy() -> bool {
     line_icons() && !vert()
+}
+/// The Delphos bar floats: this much air under it and beside it, inside its own window.
+fn float_gap() -> i32 {
+    if airy() { sc(6) } else { 0 }
+}
+fn side_gap() -> i32 {
+    if airy() { sc(8) } else { 0 }
+}
+/// Left edge of the gear.
+fn gear_left() -> i32 {
+    sc(GEAR_X.0) + side_gap()
 }
 /// Width of one tray icon's slot.
 fn tcell() -> i32 {
@@ -1385,7 +1397,7 @@ fn layout(w: i32) -> Layout {
     let gap = sc(if airy() { 6 } else { 4 });
     // the Delphos style: date and time on one line, the battery as an icon alone
     let slim = airy();
-    let clock = (w - sc(if !slim { 96 } else if unsafe { clock_texts() }.0.len() > 5 { 172 } else { 148 }), w - sc(6));
+    let clock = (w - sc(if !slim { 96 } else if unsafe { clock_texts() }.0.len() > 5 { 172 } else { 148 }) - side_gap(), w - sc(6) - side_gap());
     let bat = BAT.get().0 >= 0;
     let sys = (clock.0 - sc(4) - sc(if slim { if bat { 170 } else { 134 } } else { 150 + if bat { 66 } else { 0 } }), clock.0 - sc(4));
     let apps = (sys.0 - tcell() * tray_count() as i32, sys.0);
@@ -1397,7 +1409,7 @@ fn layout(w: i32) -> Layout {
     // ...but never so far right that the windows' buttons run into the tray: then the whole row shifts left
     let right_limit = w - margin - (n * (bw + gap) - gap);
     let centered = (w - (fixed * (bw + gap) - gap)) / 2;
-    Layout { x0: if i18n::style::align_left() { 0 } else { centered }.min(right_limit).max(sc(GEAR_X.0 + GEAR_X.1 + 6)), bw, gap, apps, sys, clock } // clear of the gear
+    Layout { x0: if i18n::style::align_left() { 0 } else { centered }.min(right_limit).max(gear_left() + sc(GEAR_X.1 + 6)), bw, gap, apps, sys, clock } // clear of the gear
 }
 
 unsafe fn hit(hwnd: HWND, x: i32, y: i32) -> i32 {
@@ -1405,7 +1417,7 @@ unsafe fn hit(hwnd: HWND, x: i32, y: i32) -> i32 {
     GetClientRect(hwnd, &mut r);
     // a side bar runs the same layout along its height
     let (x, l) = if vert() { (y, layout(r.bottom)) } else { (x, layout(r.right)) };
-    if x < sc(GEAR_X.0 + GEAR_X.1) {
+    if x < gear_left() + sc(GEAR_X.1) {
         return GEAR;
     }
     if x >= l.clock.1 {
@@ -1946,6 +1958,7 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
 
 thread_local! {
     static BG: Cell<(HDC, HBITMAP, u64)> = const { Cell::new((null_mut(), null_mut(), 0)) }; // cached background layer and its key
+    static BAR_DIB: Cell<Option<glass::Dib>> = const { Cell::new(None) };
     static BACK: Cell<(HDC, HBITMAP, (i32, i32))> = const { Cell::new((null_mut(), null_mut(), (0, 0))) };
     static FONTS: Cell<([HFONT; 4], u64)> = const { Cell::new(([null_mut(); 4], 0)) };
 }
@@ -2011,10 +2024,24 @@ unsafe fn bar_fonts() -> [HFONT; 4] {
         DeleteObject(f);
     });
     let (face, gface) = (wide(ui_face()), wide(winrust_common::style::icon_face()));
-    let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, 5, 0, f.as_ptr());
+    let aa = if line_icons() { 4 } else { 5 }; // grey smoothing on glass: ClearType's colour fringes need a known background
+    let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, aa, 0, f.as_ptr());
     let fonts = [font(&face, 13, 400), font(&face, 12, 400), font(&gface, if line_icons() { 17 } else { 16 }, 400), font(&face, 13, 600)];
     FONTS.set((fonts, key));
     fonts
+}
+
+/// The bar's glass picture, kept like `back_buffer`.
+unsafe fn bar_dib(w: i32, h: i32) -> Option<glass::Dib> {
+    let old = BAR_DIB.get();
+    if old.is_some_and(|d| (d.w, d.h) == (w, h)) {
+        return old;
+    }
+    if let Some(d) = old {
+        d.free();
+    }
+    BAR_DIB.set(glass::Dib::new(w, h));
+    BAR_DIB.get()
 }
 
 /// The bar's off-screen bitmap, kept between frames and made again only when the size changes.
@@ -2043,9 +2070,17 @@ unsafe fn paint(hwnd: HWND) {
     GetClientRect(hwnd, &mut cr);
     let h = cr.bottom;
     BUSY.set(false);
-    let dc = back_buffer(wdc, cr.right, h);
+    let glassy = if airy() { bar_dib(cr.right, h) } else { None };
+    let dc = match glassy {
+        Some(d) => d.dc,
+        None => back_buffer(wdc, cr.right, h),
+    };
     // the background (gradient, facets, hairlines) is the same every frame: drawn once per size / style, then copied
-    BitBlt(dc, 0, 0, cr.right, h, bg_layer(wdc, cr), 0, 0, SRCCOPY);
+    if glassy.is_some() {
+        fill(dc, cr, pal().bg, 0);
+    } else {
+        BitBlt(dc, 0, 0, cr.right, h, bg_layer(wdc, cr), 0, 0, SRCCOPY);
+    }
     SetBkMode(dc, TRANSPARENT as i32);
     let [f_txt, f_small, f_glyph, f_bold] = bar_fonts();
     let of = SelectObject(dc, f_txt);
@@ -2058,14 +2093,14 @@ unsafe fn paint(hwnd: HWND) {
     }
     let l = layout(cr.right);
     let fg = GetForegroundWindow();
-    let (top, bot) = if line_icons() { (sc(5), h - sc(5)) } else { (sc(4), h - sc(4)) };
+    let (top, bot) = if line_icons() { (sc(5), h - sc(5) - float_gap()) } else { (sc(4), h - sc(4)) };
     let mid = (top + bot) / 2;
     let cell = |x: i32, w: i32| RECT { left: x, top, right: x + w, bottom: bot };
     let hot = HOT.get();
     let active_bg = if line_icons() { pal().active } else { mix(pal().active, pal().accent, 0.12) }; // the focused app's button: a hint of the accent, not plain grey
 
     // the gear at the left end: the Style menu
-    let gr = RECT { left: sc(GEAR_X.0), top, right: sc(GEAR_X.0 + GEAR_X.1), bottom: bot };
+    let gr = RECT { left: gear_left(), top, right: gear_left() + sc(GEAR_X.1), bottom: bot };
     glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
     sym_t(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(GEAR, hot == GEAR));
@@ -2217,7 +2252,14 @@ unsafe fn paint(hwnd: HWND) {
     text(dc, &dt, RECT { left: cb.left, top: mid - sc(1), right: cb.right, bottom: cb.bottom }, mix(pal().dim, pal().text, 0.35), DT_CENTER);
     }
 
-    BitBlt(wdc, 0, 0, cr.right, h, dc, 0, 0, SRCCOPY);
+    if let Some(d) = glassy {
+        let slab = RECT { left: side_gap(), top: 0, right: cr.right - side_gap(), bottom: h - float_gap() };
+        glass::compose_bar(&d, glass::Slab { r: slab, rad: sc(14) as f32 });
+        glass::per_pixel(hwnd, true);
+        glass::present(hwnd, &d, 255);
+    } else {
+        BitBlt(wdc, 0, 0, cr.right, h, dc, 0, 0, SRCCOPY);
+    }
     SelectObject(dc, of);
     if BUSY.get() {
         SetTimer(hwnd, 4, FRAME, None); // next animation frame
@@ -2896,7 +2938,7 @@ unsafe fn min_rect(info: *mut ShellHookInfo, bar: HWND) {
 unsafe fn tip_cx(l: &Layout, h: i32) -> i32 {
     // along the bar: screen x for a bottom bar, screen y for a side bar
     (if vert() { 0 } else { bar_x_w().0 }) + match h {
-        GEAR => sc(GEAR_X.0 + GEAR_X.1 / 2),
+        GEAR => gear_left() + sc(GEAR_X.1 / 2),
         SEARCH => l.x0 + l.bw / 2,
         TASKVIEW => l.x0 + (l.bw + l.gap) + l.bw / 2,
         CLOCK => (l.clock.0 + l.clock.1) / 2,
@@ -3075,7 +3117,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 place(hwnd);
             }
         }
-        WM_DISPLAYCHANGE => place(hwnd),
+        WM_DISPLAYCHANGE => {
+            glass::wallpaper_changed();
+            place(hwnd);
+        }
+        WM_SETTINGCHANGE if wp == SPI_SETDESKWALLPAPER as usize => {
+            glass::wallpaper_changed();
+            InvalidateRect(hwnd, null(), 0);
+        }
         WM_DESTROY => {
             let mut ab: APPBARDATA = zeroed();
             ab.cbSize = size_of::<APPBARDATA>() as u32;
@@ -3111,7 +3160,10 @@ unsafe fn preview_bar() {
     let class = wide("topbar_previewbar");
     let hi = GetModuleHandleW(null());
     RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(proc), hInstance: hi, lpszClassName: class.as_ptr(), ..zeroed() });
-    CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, class.as_ptr(), null(), WS_POPUP | WS_VISIBLE, 0, GetSystemMetrics(SM_CYSCREEN) - 3 * bar_h(), GetSystemMetrics(SM_CXSCREEN), bar_h(), null_mut(), null_mut(), hi, null());
+    let h = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED, class.as_ptr(), null(), WS_POPUP, 0, GetSystemMetrics(SM_CYSCREEN) - 3 * bar_h(), GetSystemMetrics(SM_CXSCREEN), bar_h(), null_mut(), null_mut(), hi, null());
+    apply_opacity(h);
+    ShowWindow(h, SW_SHOWNOACTIVATE);
+    RedrawWindow(h, null(), null_mut(), RDW_INVALIDATE | RDW_UPDATENOW);
 }
 
 fn main() {

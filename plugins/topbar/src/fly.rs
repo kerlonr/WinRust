@@ -97,6 +97,8 @@ thread_local! {
     static FLY: Cell<Option<Kind>> = const { Cell::new(None) };
     static FH: Cell<HWND> = const { Cell::new(null_mut()) };
     static DEACT: Cell<(Option<Kind>, u64)> = const { Cell::new((None, 0)) }; // panel closed by losing focus, and when
+    static BACKDROP: RefCell<Option<crate::glass::Backdrop>> = const { RefCell::new(None) }; // what is behind the open panel
+    static ALPHA: Cell<u8> = const { Cell::new(255) }; // its opacity now (opening fade)
     static CAL_TURN: Cell<(i32, u64)> = const { Cell::new((0, 0)) }; // the month turned last: which way and when
     static CAL: Cell<(i32, i32)> = const { Cell::new((2026, 1)) };
     static NETS: RefCell<Vec<Net>> = const { RefCell::new(Vec::new()) };
@@ -697,11 +699,11 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
             v.extend((0..4).map(|i| (r(16 + 80 * i, 88, 88 + 80 * i, 134), Act::Tile(2 + i as u8))));
             let mut y = 164;
             if BRIGHT.load(Relaxed) >= 0 {
-                v.push((r(50, y, w - 58, y + 40), Act::BrightSlide));
+                v.push((r(16, y, w - 16, y + 40), Act::BrightSlide));
                 y += 40;
             }
-            v.push((r(14, y + 2, 50, y + 38), Act::Mute));
-            v.push((r(50, y, w - 58, y + 40), Act::VolSlide));
+            v.push((r(16, y, w - 16, y + 40), Act::VolSlide));
+            v.push((r(16, y, 50, y + 40), Act::Mute)); // on top of the capsule's end
             v.push((r(w - 50, h - 48, w - 14, h - 12), Act::Settings("ms-settings:")));
             v
         }
@@ -908,6 +910,7 @@ pub fn close_now() {
 unsafe fn kill_ghost() {
     let (g, _, _) = GHOST.replace((null_mut(), 0, (0, 0)));
     if !g.is_null() {
+        crate::glass::forget(g);
         DestroyWindow(g);
     }
 }
@@ -919,17 +922,28 @@ unsafe fn anim_step(hw: HWND) {
     if hw == g {
         let t = (now.saturating_sub(gt0) as f32 / if line_icons() { 130.0 } else { 150.0 }).min(1.0);
         let q = t * t;
-        SetLayeredWindowAttributes(hw, 0, ((1.0 - q) * 255.0) as u8, LWA_ALPHA);
-        SetWindowPos(hw, null_mut(), gpos.0, gpos.1 + (q * sc(10) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let y = gpos.1 + (q * sc(10) as f32) as i32;
+        if line_icons() {
+            crate::glass::fade(hw, gpos.0, y, ((1.0 - q) * 255.0) as u8);
+        } else {
+            SetLayeredWindowAttributes(hw, 0, ((1.0 - q) * 255.0) as u8, LWA_ALPHA);
+            SetWindowPos(hw, null_mut(), gpos.0, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
         if t >= 1.0 {
             kill_ghost();
         }
     } else if hw == FH.get() {
         let t = (now.saturating_sub(T0.get()) as f32 / if line_icons() { 320.0 } else { 220.0 }).min(1.0);
         let p = 1.0 - (1.0 - t).powi(if line_icons() { 5 } else { 3 });
-        SetLayeredWindowAttributes(hw, 0, (p * 255.0) as u8, LWA_ALPHA);
         let (x, y) = FIN.get();
-        SetWindowPos(hw, null_mut(), x, y + ((1.0 - p) * sc(if line_icons() { 24 } else { 14 }) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let y = y + ((1.0 - p) * sc(if line_icons() { 24 } else { 14 }) as f32) as i32;
+        if line_icons() {
+            ALPHA.set((p * 255.0) as u8);
+            crate::glass::fade(hw, x, y, ALPHA.get());
+        } else {
+            SetLayeredWindowAttributes(hw, 0, (p * 255.0) as u8, LWA_ALPHA);
+            SetWindowPos(hw, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
         if t >= 1.0 {
             KillTimer(hw, 3);
         }
@@ -999,8 +1013,18 @@ pub fn toggle(k: Kind) {
         } };
         let class = wide("topbar_fly");
         let fy = if vert() && k == Kind::Menu { (MENU_X.get() - h / 2).clamp(sc(8), GetSystemMetrics(SM_CYSCREEN) - h - sc(8)) } else { pop_y(h) }; // above the bar (below it at the top of the screen)
+        if line_icons() {
+            kill_ghost(); // the panel this one replaces must not end up in its glass
+            BACKDROP.set(crate::glass::capture(x, w));
+            T0.set(now_ms());
+        }
         let hw = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, class.as_ptr(), null(), WS_POPUP, x, fy + sc(14), w, h, null_mut(), null_mut(), GetModuleHandleW(null()), null());
-        SetLayeredWindowAttributes(hw, 0, 0, LWA_ALPHA); // starts invisible, anim_step fades it in
+        if line_icons() {
+            ALPHA.set(0);
+            crate::glass::per_pixel(hw, true);
+        } else {
+            SetLayeredWindowAttributes(hw, 0, 0, LWA_ALPHA); // starts invisible, anim_step fades it in
+        }
         if k == Kind::Start {
             // accept file drops (an app dragged onto the panel is added to Start); the bar may be elevated, so lift UIPI for them
             DragAcceptFiles(hw, 1);
@@ -1010,10 +1034,16 @@ pub fn toggle(k: Kind) {
         }
         FIN.set((x, fy));
         T0.set(now_ms());
-        round_window(hw, w, h, 16);
+        if !line_icons() {
+            round_window(hw, w, h, 16);
+        }
         FH.set(hw);
         FLY.set(Some(k));
         ShowWindow(hw, SW_SHOW);
+        if line_icons() {
+            RedrawWindow(hw, null(), null_mut(), RDW_INVALIDATE | RDW_UPDATENOW); // the first picture before the fade starts
+            T0.set(now_ms());
+        }
         force_fg(hw);
         SetTimer(hw, 1, 1000, None);
         SetTimer(hw, 3, FRAME, None);
@@ -1287,15 +1317,15 @@ fn drop_by(rc: RECT, t: f32) -> RECT {
     RECT { top: rc.top + d, bottom: rc.bottom + d, ..rc }
 }
 
-/// The Delphos slider: a thin line with a knob that grows under the pointer.
-unsafe fn thin_track(dc: HDC, rc: RECT, frac: f32, grab: f32, seen: f32) {
-    let (l, rr, m, th) = (rc.left + sc(8), rc.right - sc(8), (rc.top + rc.bottom) / 2, sc(2));
+/// The Delphos slider: a capsule that fills up, a little taller under the pointer.
+unsafe fn capsule(dc: HDC, rc: RECT, frac: f32, grab: f32, seen: f32) {
+    let (l, rr, m, th) = (rc.left, rc.right, (rc.top + rc.bottom) / 2, sc(14) + (sc(1) as f32 * grab) as i32);
     let c = |c: u32| mix(pal().bg, c, seen);
-    fill(dc, RECT { left: l, top: m - th, right: rr, bottom: m + th }, c(mix(pal().bg, pal().text, 0.14)), 2 * th);
-    let x = l + ((rr - l) as f32 * frac.clamp(0.0, 1.0)) as i32;
-    fill(dc, RECT { left: l, top: m - th, right: x.max(l + 2 * th), bottom: m + th }, c(pal().accent), 2 * th);
-    let kr = sc(6) + (sc(2) as f32 * grab) as i32;
-    fill(dc, RECT { left: x - kr, top: m - kr, right: x + kr, bottom: m + kr }, c(pal().text), 2 * kr);
+    fill(dc, RECT { left: l, top: m - th, right: rr, bottom: m + th }, c(mix(pal().bg, pal().text, 0.1 + 0.03 * grab)), 2 * th);
+    if frac > 0.004 {
+        let x = l + ((rr - l) as f32 * frac.clamp(0.0, 1.0)) as i32;
+        fill(dc, RECT { left: l, top: m - th, right: x.max(l + 2 * th), bottom: m + th }, c(mix(pal().bg, pal().text, 0.9 + 0.06 * grab)), 2 * th);
+    }
 }
 
 /// A raised rounded surface: a hairline edge (a soft shadow on the light style) around `base`.
@@ -1321,13 +1351,18 @@ unsafe fn paint(hw: HWND, k: Kind) {
     let mut cr: RECT = zeroed();
     GetClientRect(hw, &mut cr);
     BUSY.set(false);
-    let (dc, bmp) = (CreateCompatibleDC(wdc), CreateCompatibleBitmap(wdc, cr.right, cr.bottom));
-    let old = SelectObject(dc, bmp);
+    let glassy = if line_icons() { crate::glass::Dib::new(cr.right, cr.bottom) } else { None };
+    let (dc, bmp) = match glassy {
+        Some(d) => (d.dc, null_mut()),
+        None => (CreateCompatibleDC(wdc), CreateCompatibleBitmap(wdc, cr.right, cr.bottom)),
+    };
+    let old = if glassy.is_some() { null_mut() } else { SelectObject(dc, bmp) };
     frame(dc, cr, if style().light() { mix(pal().bg, pal().dim, 0.3) } else { mix(pal().bg, pal().text, 0.12) }, sc(16));
     winrust_common::style::backdrop(dc, inset(cr, 1), sc(100) as f32 / 100.0);
     SetBkMode(dc, TRANSPARENT as i32);
     let (face, gface) = (wide(ui_face()), wide(winrust_common::style::icon_face()));
-    let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, 5, 0, f.as_ptr());
+    let aa = if line_icons() { 4 } else { 5 }; // no ClearType fringes on glass
+    let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, aa, 0, f.as_ptr());
     let (f_txt, f_small, f_glyph, f_title, f_big) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 15, 600), font(&face, 34, 600));
     let (f_semi, f_head, f_gs, f_label) = (font(&face, 13, 600), font(&face, 18, 700), font(&gface, 11, 400), font(&face, 12, 600));
     let f_cap = font(&face, 11, 400);
@@ -1373,11 +1408,13 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 let rc = drop_by(rs.iter().find(|(_, a)| *a == Act::Tile(i as u8)).unwrap().0, t);
                 let key = TILE_KEY + i as i32;
                 let (th, on, p) = (hv(key, hot(Act::Tile(i as u8))), hv(key + 50, states[i]), press_t(key));
-                let base = mix(mix(pal().bg, pal().text, 0.055 + 0.04 * th), mix(pal().bg, pal().accent, 0.2 + 0.06 * th), on);
+                // wide tiles stay glass and light their round badge, the small ones light up whole
+                let lit = if i < 2 { 0.0 } else { on };
+                let base = mix(mix(pal().bg, pal().text, 0.08 + 0.05 * th), mix(pal().accent, pal().text, 0.12 * th), lit);
                 let seen = |c: u32| mix(pal().bg, c, t);
                 let body = inset(rc, (p * sc(3) as f32) as i32);
-                fill(dc, body, seen(base), sc(24));
-                let ink = seen(mix(mix(pal().dim, pal().text, 0.75), pal().accent, on));
+                fill(dc, body, seen(base), sc(28));
+                let ink = seen(mix(mix(pal().dim, pal().text, 0.8), pal().bg, on));
                 if i >= 2 {
                     SelectObject(dc, f_glyph);
                     sym(dc, glyphs[i], body, ink);
@@ -1385,11 +1422,14 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     text(dc, captions[i], RECT { left: rc.left - sc(4), right: rc.right + sc(4), top: rc.bottom + sc(3), bottom: rc.bottom + sc(19) }, seen(pal().dim), DT_CENTER);
                     continue;
                 }
-                let icon = RECT { left: rc.left + sc(8), right: rc.left + sc(40), ..rc };
+                let (cy, cx) = ((rc.top + rc.bottom) / 2, rc.left + sc(27));
+                let icon = RECT { left: cx - sc(16), right: cx + sc(16), top: cy - sc(16), bottom: cy + sc(16) };
+                let badge = mix(mix(base, pal().text, 0.14), pal().accent, on);
+                fill(dc, icon, seen(badge), sc(32));
                 let mut right = rc.right - sc(10);
                 if i == 0 {
                     let mid = (rc.top + rc.bottom) / 2;
-                    wifi_glyph(dc, (icon.left + icon.right) / 2, mid - sc(1), sc(14), if q >= 0 { arcs_lit(q) } else { 0 }, ink, mix(ink, seen(base), 0.6), 0);
+                    wifi_glyph(dc, (icon.left + icon.right) / 2, mid - sc(1), sc(13), if q >= 0 { arcs_lit(q) } else { 0 }, ink, mix(ink, seen(badge), 0.6), 0);
                     let more = drop_by(rs.iter().find(|(_, a)| *a == Act::WifiMore).unwrap().0, t);
                     let tm = hv(key + 20, hot(Act::WifiMore));
                     if tm > 0.01 {
@@ -1404,9 +1444,9 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 }
                 let mid = (rc.top + rc.bottom) / 2;
                 SelectObject(dc, f_semi);
-                text(dc, if i == 0 { "Wi‑Fi" } else { "Bluetooth" }, RECT { left: rc.left + sc(46), right, top: mid - sc(18), bottom: mid }, seen(pal().text), DT_LEFT);
+                text(dc, if i == 0 { "Wi‑Fi" } else { "Bluetooth" }, RECT { left: rc.left + sc(50), right, top: mid - sc(18), bottom: mid }, seen(pal().text), DT_LEFT);
                 SelectObject(dc, f_small);
-                text(dc, if i == 0 { wsub.as_str() } else { bsub }, RECT { left: rc.left + sc(46), right, top: mid, bottom: mid + sc(17) }, seen(pal().dim), DT_LEFT);
+                text(dc, if i == 0 { wsub.as_str() } else { bsub }, RECT { left: rc.left + sc(50), right, top: mid, bottom: mid + sc(17) }, seen(pal().dim), DT_LEFT);
             }
             let bright = BRIGHT.load(Relaxed);
             let mut y = 164;
@@ -1420,18 +1460,16 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 let t = rise(6 + n as i32);
                 let seen = |c: u32| mix(pal().bg, c, t);
                 let d = ((1.0 - t) * 14.0) as i32;
-                if n == 1 {
-                    g(Act::Mute, r(16, y + 4, 48, y + 36), pal().bg, mix(pal().bg, pal().text, 0.08), sc(32));
-                }
-                SelectObject(dc, f_glyph);
-                sym(dc, glyph, r(16, y + d, 48, y + 40 + d), seen(if off { BAD } else { mix(pal().dim, pal().text, 0.7) }));
                 // under a drag the fill sticks to the pointer, otherwise it glides
                 let shown = if DRAG.get() == 2 - n as u8 { GLIDE.with_borrow_mut(|m| m.insert(TILE_KEY + 80 + n as i32, (value, now_ms()))); value } else { glide(TILE_KEY + 80 + n as i32, value) };
                 let rc = drop_by(rs.iter().find(|(_, a)| *a == slider).unwrap().0, t);
                 let grab = hv(TILE_KEY + 90 + n as i32, hot(slider) || DRAG.get() == 2 - n as u8);
-                thin_track(dc, rc, shown, grab, t);
+                capsule(dc, rc, shown, grab, t);
+                // the icon sits in the filled end, the number in the empty one
+                SelectObject(dc, f_glyph);
+                sym(dc, glyph, r(20, y + d, 48, y + 40 + d), if off { seen(BAD) } else if shown > 0.04 { seen(mix(pal().bg, pal().text, 0.12)) } else { seen(pal().dim) });
                 SelectObject(dc, f_small);
-                text(dc, &format!("{}%", (shown * 100.0).round() as i32), r(w - 60, y + d, w - 18, y + 40 + d), seen(pal().dim), DT_RIGHT);
+                text(dc, &format!("{}%", (shown * 100.0).round() as i32), r(w - 70, y + d, w - 28, y + 40 + d), seen(if shown > 0.86 { mix(pal().bg, pal().text, 0.3) } else { pal().dim }), DT_RIGHT);
                 y += 40;
             }
             // footer: battery on the left, settings on the right
@@ -1664,7 +1702,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     for (i, n) in nets.iter().enumerate() {
                         let rc = drop_by(rs[i].0, rise(i as i32));
                         // in the Delphos style the list lies flat on the panel, only the connected network has a tinted card
-                        let card = if !line_icons() { card } else if n.connected { mix(pal().bg, pal().accent, 0.12) } else { pal().bg };
+                        let card = if !line_icons() { card } else if n.connected { mix(pal().bg, pal().text, 0.1) } else { pal().bg };
                         // rows fade in one after another when the panel opens
                         let t = ease(((age - 40.0 * i as f32) / 220.0).clamp(0.0, 1.0));
                         if t < 1.0 {
@@ -1684,7 +1722,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         let online = !matches!(state, Link::NoInternet(_));
                         let cy = (rc.top + rc.bottom) / 2;
                         let arc = if n.connected || busy { pal().accent } else { pal().text };
-                        wifi_glyph(dc, rc.left + sc(26), cy - sc(1), sc(16), lit, ink(arc), ink(mix(pal().dim, card, 0.55)), if n.connected && !online { 2 } else { 0 });
+                        wifi_glyph(dc, rc.left + sc(26), cy - sc(1), sc(16), lit, ink(arc), ink(mix(pal().dim, card, if line_icons() { 0.7 } else { 0.55 })), if n.connected && !online { 2 } else { 0 });
                         let saved = n.profile.is_some();
                         let (sub, sub_c) = if busy {
                             (format!("{}{}", t!("Подключение", "Connecting", ja: "接続中", pt: "Conectando", zh: "正在连接"), &"...."[..(now / 400 % 4) as usize]), pal().accent)
@@ -1698,7 +1736,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                                 None => (format!("{} · {q}%", t!("Подключено", "Connected", ja: "接続済み", pt: "Conectado", zh: "已连接")), pal().dim),
                             }
                         } else if !n.secure {
-                            (t!("Открытая сеть", "Open network", ja: "オープン ネットワーク", pt: "Rede aberta", zh: "开放网络").into(), WARN)
+                            (t!("Открытая сеть", "Open network", ja: "オープン ネットワーク", pt: "Rede aberta", zh: "开放网络").into(), if line_icons() { mix(pal().dim, WARN, 0.45) } else { WARN })
                         } else if saved {
                             (t!("Сохранена", "Saved", ja: "保存済み", pt: "Salva", zh: "已保存").into(), pal().dim)
                         } else {
@@ -1928,14 +1966,25 @@ unsafe fn paint(hw: HWND, k: Kind) {
         }
     }
 
-    BitBlt(wdc, 0, 0, cr.right, cr.bottom, dc, 0, 0, SRCCOPY);
+    if let Some(d) = &glassy {
+        let mut wr: RECT = zeroed();
+        GetWindowRect(hw, &mut wr);
+        BACKDROP.with_borrow(|b| crate::glass::compose(d, b.as_ref(), wr.left, wr.top, crate::glass::Slab { r: cr, rad: sc(16) as f32 }));
+        crate::glass::present(hw, d, ALPHA.get());
+    } else {
+        BitBlt(wdc, 0, 0, cr.right, cr.bottom, dc, 0, 0, SRCCOPY);
+    }
     SelectObject(dc, of);
     for f in [f_txt, f_small, f_glyph, f_title, f_big, f_semi, f_head, f_gs, f_label, f_cap] {
         DeleteObject(f);
     }
-    SelectObject(dc, old);
-    DeleteObject(bmp);
-    DeleteDC(dc);
+    if let Some(d) = glassy {
+        d.free();
+    } else {
+        SelectObject(dc, old);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+    }
     if BUSY.get() {
         SetTimer(hw, 2, FRAME, None); // next animation frame
     } else {
@@ -1990,7 +2039,9 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 let y = pop_y(h);
                 FIN.set((x, y));
                 SetWindowPos(hw, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-                round_window(hw, w, h, 16);
+                if !line_icons() {
+                    round_window(hw, w, h, 16);
+                }
             }
             InvalidateRect(hw, null(), 0);
         }

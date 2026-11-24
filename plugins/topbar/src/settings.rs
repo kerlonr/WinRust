@@ -127,6 +127,10 @@ pub(crate) unsafe fn bar_page() {
 
 /// Bar transparency from the colours page (the window is layered; 100 % = opaque).
 pub(crate) unsafe fn apply_opacity(hwnd: HWND) {
+    glass::per_pixel(hwnd, airy()); // the glass carries its own alpha; the setting moves its tint instead
+    if airy() {
+        return;
+    }
     SetLayeredWindowAttributes(hwnd, 0, (255 * i18n::style::bar_opacity() as u32 / 100) as u8, LWA_ALPHA);
 }
 
