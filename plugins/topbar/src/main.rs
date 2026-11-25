@@ -935,7 +935,7 @@ unsafe fn lnk_target(lnk: &[u16]) -> String {
 
 /// The target's own icon: SHGetFileInfo on the .lnk adds the shortcut arrow, so that is only the fallback.
 unsafe fn lnk_icon(lnk: &[u16], target: &str) -> HICON {
-    let ic = item_icon(&resolve_cmd(&wstr_of(lnk)), icon_px());
+    let ic = item_icon(&resolve_cmd(&wstr_of(lnk)), load_px());
     if !ic.is_null() {
         return ic;
     }
@@ -954,7 +954,7 @@ unsafe fn lnk_icon(lnk: &[u16], target: &str) -> HICON {
 /// Size app icons are drawn at (24 logical px, like the Windows 11 taskbar). Icons are loaded at exactly this size:
 /// a 32 px icon stretched by DrawIconEx comes out jagged.
 fn icon_px() -> i32 {
-    sc(24)
+    sc(24 + if line_icons() { [-4, 0, 5][i18n::style::bar_size() as usize % 3] } else { 0 }) // follows the bar's size
 }
 
 /// Icon of a file, shortcut (its target's icon, no arrow) or shell item ("shell:AppsFolder\<app id>") rendered by the
@@ -971,6 +971,7 @@ unsafe fn item_icon(path: &str, px: i32) -> HICON {
     let mask = CreateBitmap(px, px, 1, 1, null()); // ignored: the 32-bit colour bitmap carries the alpha
     let mut ii = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
     let ic = CreateIconIndirect(&mut ii);
+    remember(ic, color, px);
     DeleteObject(mask);
     DeleteObject(color);
     ic
@@ -999,7 +1000,7 @@ unsafe fn win_icon(w: HWND) -> HICON {
         }
         return own(w);
     }
-    let ic = EXE_ICONS.with_borrow_mut(|m| *m.entry(exe.clone()).or_insert_with(|| item_icon(&exe, icon_px())));
+    let ic = EXE_ICONS.with_borrow_mut(|m| *m.entry(exe.clone()).or_insert_with(|| item_icon(&exe, load_px())));
     if ic.is_null() { own(w) } else { ic }
 }
 
@@ -1029,7 +1030,7 @@ unsafe fn store_icon(frame: HWND) -> HICON {
         return null_mut();
     }
     let id = format!(r"shell:AppsFolder\{}", wstr_of(&buf));
-    EXE_ICONS.with_borrow_mut(|m| *m.entry(id.clone()).or_insert_with(|| item_icon(&id, icon_px())))
+    EXE_ICONS.with_borrow_mut(|m| *m.entry(id.clone()).or_insert_with(|| item_icon(&id, load_px())))
 }
 
 /// "c:\program files\windowsapps\claude_5.1.0.0_x64__pzs8\app\claude.exe" -> ("claude_pzs8", "app\claude.exe"):
@@ -1465,7 +1466,8 @@ unsafe fn hv(key: i32, on: bool) -> f32 {
         let e = m.entry(key).or_insert((0.0, now));
         let dt = now.saturating_sub(e.1).min(50) as f32; // a long pause must not make the first frame jump
         e.1 = now;
-        e.0 = if e.0 < target { (e.0 + dt / 130.0).min(target) } else { (e.0 - dt / 180.0).max(target) };
+        let (up, down) = if line_icons() { (80.0, 150.0) } else { (130.0, 180.0) };
+        e.0 = if e.0 < target { (e.0 + dt / up).min(target) } else { (e.0 - dt / down).max(target) };
         e.0
     });
     if v != target {
@@ -1865,8 +1867,7 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
                 fill(dc, r, mix(pal().bg, pal().accent, 0.4), sc(8));
             }
             if i == 0 && line_icons() {
-                SelectObject(dc, f_glyph);
-                sym_t(dc, START, r, mix(pal().text, pal().accent, th), th);
+                win_logo(dc, r, icon_px() * 19 / 24, th, tp);
                 continue;
             }
             if i == 0 {
@@ -1887,7 +1888,7 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
             let key = b.pin.map(|p| -(p as isize) - 1).or_else(|| b.wins.first().map(|&w| w as isize)).unwrap_or(0);
             let isz = (icon_px().min(l.bw - sc(6)) as f32 * (1.0 - 0.18 * tp) * (0.55 + 0.45 * appear(key))) as i32;
             if !ic.is_null() {
-                DrawIconEx(dc, cx - isz / 2, mid - isz / 2, ic, isz, isz, 0, null_mut(), DI_NORMAL);
+                app_icon(dc, ic, cx as f32, mid as f32, isz as f32);
             }
             if !b.wins.is_empty() {
                 // the running-app pill stands on the edge facing the screen's border
@@ -2015,7 +2016,7 @@ unsafe fn bg_layer(wdc: HDC, cr: RECT) -> HDC {
 
 /// The bar's four fonts, made again only when the scale or the style's faces change.
 unsafe fn bar_fonts() -> [HFONT; 4] {
-    let key = key_of((SCALE.get().to_bits(), ui_face(), winrust_common::style::icon_face(), line_icons()));
+    let key = key_of((SCALE.get().to_bits(), ui_face(), winrust_common::style::icon_face(), line_icons(), i18n::style::bar_size()));
     let (fonts, k) = FONTS.get();
     if k == key {
         return fonts;
@@ -2026,7 +2027,7 @@ unsafe fn bar_fonts() -> [HFONT; 4] {
     let (face, gface) = (wide(ui_face()), wide(winrust_common::style::icon_face()));
     let aa = if line_icons() { 4 } else { 5 }; // grey smoothing on glass: ClearType's colour fringes need a known background
     let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, aa, 0, f.as_ptr());
-    let fonts = [font(&face, 13, 400), font(&face, 12, 400), font(&gface, if line_icons() { 17 } else { 16 }, 400), font(&face, 13, 600)];
+    let fonts = [font(&face, 13, 400), font(&face, 12, 400), font(&gface, if line_icons() { 18 + [-2, 0, 3][i18n::style::bar_size() as usize % 3] } else { 16 }, 400), font(&face, 13, 600)];
     FONTS.set((fonts, key));
     fonts
 }
@@ -2084,6 +2085,7 @@ unsafe fn paint(hwnd: HWND) {
     SetBkMode(dc, TRANSPARENT as i32);
     let [f_txt, f_small, f_glyph, f_bold] = bar_fonts();
     let of = SelectObject(dc, f_txt);
+    let mut icons: Vec<(HICON, f32, f32, f32)> = vec![];
 
     'horiz: {
 
@@ -2103,16 +2105,16 @@ unsafe fn paint(hwnd: HWND) {
     let gr = RECT { left: gear_left(), top, right: gear_left() + sc(GEAR_X.1), bottom: bot };
     glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
-    sym_t(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(GEAR, hot == GEAR));
+    sym_t(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(GEAR, hot == GEAR), press_t(GEAR));
 
     // search button (left of Start)
     let sb = RECT { left: l.x0, top, right: l.x0 + l.bw, bottom: bot };
     glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
-    sym(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) });
+    sym_t(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(SEARCH, hot == SEARCH), press_t(SEARCH));
     let tb = RECT { left: l.x0 + l.bw + l.gap, top, right: l.x0 + 2 * l.bw + l.gap, bottom: bot };
     glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, sc(8));
-    sym(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { mix(pal().dim, pal().text, 0.5) });
+    sym_t(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(TASKVIEW, hot == TASKVIEW), press_t(TASKVIEW));
 
     // Start, pinned apps, open windows (center)
     BTNS.with_borrow(|btns| {
@@ -2129,8 +2131,7 @@ unsafe fn paint(hwnd: HWND) {
                 fill(dc, r, mix(pal().bg, pal().accent, 0.4), sc(8));
             }
             if i == 0 && line_icons() {
-                SelectObject(dc, f_glyph);
-                sym_t(dc, START, r, mix(pal().text, pal().accent, th), th);
+                win_logo(dc, r, icon_px() * 19 / 24, th, tp);
                 continue;
             }
             if i == 0 {
@@ -2154,7 +2155,12 @@ unsafe fn paint(hwnd: HWND) {
             let isz = (icon_px().min(l.bw - sc(6)) as f32 * (1.0 - 0.18 * tp) * (0.55 + 0.45 * appear(key))) as i32;
             let lift = if line_icons() { sc(2) as f32 * th + b.pin.map_or(0.0, |p| launch_hop(p, !b.wins.is_empty())) } else { sc(1) as f32 * th };
             if !ic.is_null() {
-                DrawIconEx(dc, x + (l.bw - isz) / 2, mid - isz / 2 - sc(2) - lift as i32, ic, isz, isz, 0, null_mut(), DI_NORMAL);
+                if glassy.is_some() {
+                    let k = icon_px().min(l.bw - sc(6)) as f32 * (1.0 + 0.1 * th) * (1.0 - 0.18 * tp) * (0.55 + 0.45 * appear(key));
+                    icons.push((ic, x as f32 + l.bw as f32 / 2.0, (mid - sc(2)) as f32 - lift, k)); // after the glass: it would take an icon's dark parts for a thin layer
+                } else {
+                    DrawIconEx(dc, x + (l.bw - isz) / 2, mid - isz / 2 - sc(2) - lift as i32, ic, isz, isz, 0, null_mut(), DI_NORMAL);
+                }
             }
             if !b.wins.is_empty() {
                 let min = b.wins.iter().all(|&w| IsIconic(w) != 0);
@@ -2188,7 +2194,11 @@ unsafe fn paint(hwnd: HWND) {
             let x = l.apps.0 + i as i32 * tcell();
             glow(dc, TAPP + i as i32, hot == TAPP + i as i32, cell(x, tcell()), pal().bg, pal().hover, sc(8));
             if !ti.icon.is_null() {
-                DrawIconEx(dc, x + (tcell() - sc(16)) / 2, mid - sc(8), ti.icon, sc(16), sc(16), 0, null_mut(), DI_NORMAL);
+                if glassy.is_some() {
+                    icons.push((ti.icon, x as f32 + tcell() as f32 / 2.0, mid as f32, sc(16) as f32));
+                } else {
+                    DrawIconEx(dc, x + (tcell() - sc(16)) / 2, mid - sc(8), ti.icon, sc(16), sc(16), 0, null_mut(), DI_NORMAL);
+                }
             }
         }
     });
@@ -2209,16 +2219,23 @@ unsafe fn paint(hwnd: HWND) {
         text(dc, &lang_name(), cell(x, sc(34)), icon_ink(), DT_LEFT);
     }
     x += sc(42);
-    net_icon(dc, if line_icons() { at(0) } else { x + sc(9) }, mid, sc(17), f_glyph);
+    // status icons answer to the pointer one by one
+    let (hn, hvol, hb) = (hv(WIFI_I, hot == WIFI_I), hv(VOL_I, hot == VOL_I), hv(BAT_I, hot == BAT_I));
+    if line_icons() {
+        let grow = [-2, 0, 3][i18n::style::bar_size() as usize % 3];
+        net_icon(dc, at(0), mid, (sc(18 + grow) as f32 * (1.0 + 0.1 * hn) * (1.0 - 0.18 * press_t(WIFI_I))) as i32, f_glyph);
+    } else {
+        net_icon(dc, x + sc(9), mid, sc(17), f_glyph);
+    }
     x += sc(32);
     SelectObject(dc, f_glyph);
     let (vol, muted) = VOL.get();
     let vg = vol_glyph(vol, muted);
-    sym(dc, vg, if line_icons() { cell(at(1) - sc(11), sc(22)) } else { cell(x, sc(22)) }, if muted { BAD } else { icon_ink() });
+    sym_t(dc, vg, if line_icons() { cell(at(1) - sc(11), sc(22)) } else { cell(x, sc(22)) }, if muted { BAD } else { mix(icon_ink(), pal().text, hvol) }, hvol, press_t(VOL_I));
     x += sc(32);
     let (pct, ac) = BAT.get();
     if pct >= 0 && line_icons() {
-        sym(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, cell(at(2) - sc(11), sc(22)), if !ac && pct <= 15 { BAD } else { icon_ink() });
+        sym_t(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, cell(at(2) - sc(11), sc(22)), if !ac && pct <= 15 { BAD } else { mix(icon_ink(), pal().text, hb) }, hb, press_t(BAT_I));
     } else if pct >= 0 {
         let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
         let (bw, bh, by) = (sc(22), sc(11), mid - sc(5));
@@ -2255,6 +2272,10 @@ unsafe fn paint(hwnd: HWND) {
     if let Some(d) = glassy {
         let slab = RECT { left: side_gap(), top: 0, right: cr.right - side_gap(), bottom: h - float_gap() };
         glass::compose_bar(&d, glass::Slab { r: slab, rad: sc(14) as f32 });
+        for &(ic, x, y, k) in &icons {
+            app_icon(d.dc, ic, x, y, k);
+            d.solid(RECT { left: (x - k / 2.0) as i32 - 1, top: (y - k / 2.0) as i32 - 1, right: (x + k / 2.0) as i32 + 2, bottom: (y + k / 2.0) as i32 + 2 });
+        }
         glass::per_pixel(hwnd, true);
         glass::present(hwnd, &d, 255);
     } else {
@@ -3072,7 +3093,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if HOT.replace(h) != h {
                 hide_tip(hwnd);
                 if h != NONE {
-                    SetTimer(hwnd, 2, 450, None);
+                    SetTimer(hwnd, 2, if line_icons() { 280 } else { 450 }, None);
                 }
                 InvalidateRect(hwnd, null(), 0);
             }

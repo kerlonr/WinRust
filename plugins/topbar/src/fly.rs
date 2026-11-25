@@ -1494,7 +1494,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             let (gear, ga) = *rs.iter().find(|(_, a)| matches!(a, Act::Settings(_))).unwrap();
             g(ga, gear, pal().bg, mix(pal().bg, pal().text, 0.08), sc(36));
             SelectObject(dc, f_glyph);
-            sym_t(dc, "\u{E713}", gear, seen(mix(pal().dim, pal().text, 0.7)), hv(TILE_KEY + 40, hot(ga)));
+            sym_t(dc, "\u{E713}", gear, seen(mix(pal().dim, pal().text, 0.7)), hv(TILE_KEY + 40, hot(ga)), 0.0);
         }
         Kind::Quick => {
             let rs = rects(k);
@@ -1825,7 +1825,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     let tile = r(14, 12, 48, 46);
                     fill(dc, tile, mix(pal().bg, pal().accent, 0.16), sc(10));
                     if !ic.is_null() {
-                        DrawIconEx(dc, tile.left + sc(5), tile.top + sc(5), *ic, sc(24), sc(24), 0, null_mut(), DI_NORMAL);
+                        app_icon(dc, *ic, (tile.left + tile.right) as f32 / 2.0, (tile.top + tile.bottom) as f32 / 2.0, sc(24) as f32);
                     } else {
                         SelectObject(dc, f_glyph); // no app icon (Style, Language): the menu's own symbol
                         sym(dc, glyph, tile, pal().accent);
@@ -1861,7 +1861,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     // plain text rows: a window's own icon is the only picture; the current choice gets an accent dot
                     let mut lx = rc.left + sc(14);
                     if !it.icon.is_null() {
-                        DrawIconEx(dc, lx, (rc.top + rc.bottom) / 2 - sc(8), it.icon, sc(16), sc(16), 0, null_mut(), DI_NORMAL);
+                        app_icon(dc, it.icon, (lx + sc(8)) as f32, (rc.top + rc.bottom) as f32 / 2.0, sc(16) as f32);
                         lx += sc(26);
                     }
                     if it.swatch != u32::MAX {
@@ -1943,7 +1943,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                             })
                         });
                         if !ic.is_null() {
-                            DrawIconEx(dc, rc.left + sc(13), (rc.top + rc.bottom - icon_px()) / 2, ic, icon_px(), icon_px(), 0, null_mut(), DI_NORMAL); // at its loaded size: no stretching
+                            app_icon(dc, ic, (rc.left + sc(13) + sc(24) / 2) as f32, (rc.top + rc.bottom) as f32 / 2.0, sc(24) as f32); // smooth, or at its loaded size
                         }
                         let store = wstr(&app.1).starts_with("shell:");
                         text(dc, &app.0, RECT { left: rc.left + sc(52), top: rc.top, right: rc.right - sc(110), bottom: rc.bottom }, pal().text, DT_LEFT);

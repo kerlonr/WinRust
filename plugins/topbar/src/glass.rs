@@ -54,6 +54,15 @@ impl Dib {
         GdiFlush();
         std::slice::from_raw_parts_mut(self.bits, (self.w * self.h) as usize)
     }
+    /// Makes the pixels of `r` opaque again: GDI+ leaves their alpha undefined.
+    pub(crate) unsafe fn solid(&self, r: RECT) {
+        let w = self.w;
+        let (l, t, rr, b) = (r.left.clamp(0, w), r.top.clamp(0, self.h), r.right.clamp(0, w), r.bottom.clamp(0, self.h));
+        let px = self.pixels();
+        for y in t..b {
+            px[(y * w + l) as usize..(y * w + rr.max(l)) as usize].iter_mut().for_each(|p| *p |= 0xFF00_0000);
+        }
+    }
     pub(crate) unsafe fn free(self) {
         DeleteDC(self.dc);
         DeleteObject(self.bmp);

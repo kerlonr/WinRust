@@ -1,8 +1,93 @@
 //! topbar: line icons of the Delphos style, drawn on a 24x24 grid with one thin round-ended stroke (shares main.rs through `super::*`).
 use super::*;
-use windows_sys::Win32::Graphics::GdiPlus::{GdipDrawEllipse, GdipDrawPath, GdipSetPenLineJoin, LineJoinRound};
+use windows_sys::Win32::Graphics::GdiPlus::{
+    GdipCreateBitmapFromScan0, GdipCreateLineBrush, GdipDisposeImage, GdipDrawEllipse, GdipDrawImageRect, GdipDrawPath, GdipSetInterpolationMode, GdipSetPenLineJoin, GpBitmap, GpImage, GpLineGradient, InterpolationModeHighQualityBicubic,
+    LineJoinRound, PointF, WrapModeTileFlipXY,
+};
 
-pub(crate) const START: &str = "start"; // not a font glyph: the other styles paint the logo's tiles
+thread_local! {
+    // app icons as GDI+ bitmaps (with the pixels they point to): drawn at any size without jagged edges
+    static SMOOTH: RefCell<HashMap<usize, (*mut GpBitmap, Vec<u32>)>> = RefCell::new(HashMap::new());
+}
+
+/// Size app icons are loaded at: twice what they are drawn at in the Delphos style, so hover and click can scale them cleanly.
+pub(crate) fn load_px() -> i32 {
+    sc(if line_icons() { 48 } else { 24 })
+}
+
+/// Keeps a smooth copy of icon `ic`, whose 32-bit colour bitmap is `color` (px x px).
+pub(crate) unsafe fn remember(ic: HICON, color: HBITMAP, px: i32) {
+    let mut bi: BITMAPINFO = zeroed();
+    bi.bmiHeader = BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: px, biHeight: -px, biPlanes: 1, biBitCount: 32, ..zeroed() };
+    let mut bits = vec![0u32; (px * px) as usize];
+    let dc = GetDC(null_mut());
+    let got = GetDIBits(dc, color, 0, px as u32, bits.as_mut_ptr() as *mut _, &mut bi, DIB_RGB_COLORS);
+    ReleaseDC(null_mut(), dc);
+    let old = SMOOTH.with_borrow_mut(|m| m.remove(&(ic as usize))); // a handle used again for another icon
+    if let Some((b, _)) = old {
+        GdipDisposeImage(b as *mut GpImage);
+    }
+    if got != px || ic.is_null() || bits.iter().all(|p| p >> 24 == 0) {
+        return; // no alpha: DrawIconEx knows its mask
+    }
+    let straight = bits.iter().any(|p| [16, 8, 0].iter().any(|s| p >> s & 255 > p >> 24));
+    let mut b: *mut GpBitmap = null_mut();
+    let fmt = if straight { 0x0026_200A } else { 0x000E_200B }; // PixelFormat32bppARGB / 32bppPARGB
+    if GdipCreateBitmapFromScan0(px, px, px * 4, fmt, bits.as_ptr() as *const u8, &mut b) == 0 && !b.is_null() {
+        SMOOTH.with_borrow_mut(|m| m.insert(ic as usize, (b, bits)));
+    }
+}
+
+/// An app icon centered on (cx, cy), `size` px wide.
+pub(crate) unsafe fn app_icon(dc: HDC, ic: HICON, cx: f32, cy: f32, size: f32) {
+    let mut g: *mut GpGraphics = null_mut();
+    if let Some(b) = SMOOTH.with_borrow(|m| m.get(&(ic as usize)).map(|e| e.0)) {
+        if GdipCreateFromHDC(dc, &mut g) == 0 && !g.is_null() {
+            GdipSetInterpolationMode(g, InterpolationModeHighQualityBicubic);
+            GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
+            GdipDrawImageRect(g, b as *mut GpImage, cx - size / 2.0, cy - size / 2.0, size, size);
+            GdipDeleteGraphics(g);
+            return;
+        }
+    }
+    let s = size as i32;
+    DrawIconEx(dc, cx as i32 - s / 2, cy as i32 - s / 2, ic, s, s, 0, null_mut(), DI_NORMAL);
+}
+
+/// The Windows logo: four solid panes in one blue gradient, on whole pixels; a little bigger and brighter under the pointer
+/// (`t`), squeezed by a click (`p`).
+pub(crate) unsafe fn win_logo(dc: HDC, r: RECT, size: i32, t: f32, p: f32) {
+    let mut g: *mut GpGraphics = null_mut();
+    if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
+        return;
+    }
+    GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+    GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
+    let want = size as f32 * (1.0 + 0.1 * t) * (1.0 - 0.16 * p);
+    let gap = (want * 0.055).round().max(1.0);
+    let pane = ((want - gap) / 2.0).round();
+    let full = 2.0 * pane + gap;
+    let (x, y) = (((r.left + r.right) as f32 / 2.0 - full / 2.0).round(), ((r.top + r.bottom) as f32 / 2.0 - full / 2.0).round());
+    let argb = |c: u32| 0xFF00_0000 | (c & 255) << 16 | (c & 0xFF00) | (c >> 16 & 255);
+    let (a, b) = (mix(rgb(120, 220, 255), rgb(255, 255, 255), 0.25 * t), mix(rgb(16, 126, 232), rgb(120, 200, 255), 0.35 * t));
+    let mut br: *mut GpLineGradient = null_mut();
+    GdipCreateLineBrush(&PointF { X: x - 1.0, Y: y - 1.0 }, &PointF { X: x + full + 1.0, Y: y + full + 1.0 }, argb(a), argb(b), WrapModeTileFlipXY, &mut br);
+    let d = (pane * 0.16).max(1.0); // the panes' corners are barely rounded
+    for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+        let (px, py) = (x + dx * (pane + gap), y + dy * (pane + gap));
+        let mut path: *mut GpPath = null_mut();
+        GdipCreatePath(FillModeAlternate, &mut path);
+        GdipAddPathArc(path, px, py, d, d, 180.0, 90.0);
+        GdipAddPathArc(path, px + pane - d, py, d, d, 270.0, 90.0);
+        GdipAddPathArc(path, px + pane - d, py + pane - d, d, d, 0.0, 90.0);
+        GdipAddPathArc(path, px, py + pane - d, d, d, 90.0, 90.0);
+        GdipClosePathFigure(path);
+        GdipFillPath(g, br as *mut GpBrush, path);
+        GdipDeletePath(path);
+    }
+    GdipDeleteBrush(br as *mut GpBrush);
+    GdipDeleteGraphics(g);
+}
 
 /// The style draws its own icons instead of the icon font's.
 pub(crate) fn line_icons() -> bool {
@@ -21,12 +106,12 @@ pub(crate) fn vol_glyph(vol: i32, muted: bool) -> &'static str {
 
 /// An icon centered in `r`, as tall as the selected font: the line icon where the style has one, else the font's own glyph.
 pub(crate) unsafe fn sym(dc: HDC, s: &str, r: RECT, c: u32) {
-    sym_t(dc, s, r, c, 0.0);
+    sym_t(dc, s, r, c, 0.0, 0.0);
 }
 
-/// `sym` at hover progress `t` (0..1): the icons that react to the pointer move with it.
-pub(crate) unsafe fn sym_t(dc: HDC, s: &str, r: RECT, c: u32, t: f32) {
-    if !line_icons() || !draw(dc, s, r, c, t) {
+/// `sym` at hover progress `t` and click progress `p` (0..1): grows a little under the pointer, gives way to a click.
+pub(crate) unsafe fn sym_t(dc: HDC, s: &str, r: RECT, c: u32, t: f32, p: f32) {
+    if !line_icons() || !draw(dc, s, r, c, t, p) {
         text(dc, s, r, c, DT_CENTER);
     }
 }
@@ -84,10 +169,10 @@ impl Ink {
 }
 
 /// Draws the line icon standing in for the font glyph `s`; false when there is none.
-unsafe fn draw(dc: HDC, s: &str, r: RECT, c: u32, t: f32) -> bool {
+unsafe fn draw(dc: HDC, s: &str, r: RECT, c: u32, t: f32, press: f32) -> bool {
     let mut lf: LOGFONTW = zeroed();
     GetObjectW(GetCurrentObject(dc, OBJ_FONT as u32), size_of::<LOGFONTW>() as i32, &mut lf as *mut _ as *mut _);
-    let px = (lf.lfHeight.abs() as f32 * 1.125).max(10.0); // the 24-unit box keeps a margin the font's glyphs do not have
+    let px = (lf.lfHeight.abs() as f32 * 1.125).max(10.0) * (1.0 + 0.1 * t) * (1.0 - 0.18 * press); // the 24-unit box keeps a margin the font's glyphs do not have
     let mut g: *mut GpGraphics = null_mut();
     if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
         return false;
@@ -126,7 +211,8 @@ unsafe fn shape(i: &Ink, s: &str) -> bool {
         }
         // task view: a window in front of another
         "\u{E7C4}" => {
-            i.rect(8.5, 8.5, 12.0, 12.0, 3.0, false);
+            let d = i.t; // the windows move apart under the pointer
+            i.rect(8.5 + d, 8.5 + d, 12.0, 12.0, 3.0, false);
             i.line(&[(3.5, 13.0), (3.5, 6.5)]);
             i.arc(6.5, 6.5, 3.0, 180.0, 90.0);
             i.line(&[(6.5, 3.5), (13.0, 3.5)]);
@@ -198,12 +284,6 @@ unsafe fn shape(i: &Ink, s: &str) -> bool {
         "\u{E70E}" => i.line(&[(5.5, 15.0), (12.0, 8.5), (18.5, 15.0)]), // chevron up
         "\u{E70D}" => i.line(&[(5.5, 9.0), (12.0, 15.5), (18.5, 9.0)]),  // chevron down
         "\u{E73E}" => i.line(&[(5.0, 12.5), (10.0, 17.5), (19.0, 7.0)]), // check mark
-        // Start: four outlined tiles
-        START => {
-            for (x, y) in [(3.5, 3.5), (13.5, 3.5), (3.5, 13.5), (13.5, 13.5)] {
-                i.rect(x, y, 7.0, 7.0, 2.0 + 1.5 * i.t, false); // tiles round into dots under the pointer
-            }
-        }
         _ => return false,
     }
     true
