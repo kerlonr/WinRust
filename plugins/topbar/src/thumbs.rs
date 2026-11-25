@@ -58,14 +58,13 @@ pub(crate) fn card_at(rects: &[RECT], x: i32, y: i32) -> Option<usize> {
 
 thread_local! {
     // Each popup owns copies of its icons until it is relaid out or closed.
-    static BIG_ICONS: RefCell<HashMap<String, HICON>> = RefCell::new(HashMap::new()); // by exe: the shell takes its time drawing one
     static CARD_ICONS: RefCell<HashMap<usize, Vec<HICON>>> = RefCell::new(HashMap::new());
 }
 
 unsafe fn load_card_icon(w: HWND) -> HICON {
     let exe = exe_of(w);
     // Generic hosts represent many unrelated applications; preserve the window's icon.
-    let shell_icon = if exe.is_empty() || is_host(&exe) { null_mut() } else { BIG_ICONS.with_borrow_mut(|m| *m.entry(exe.clone()).or_insert_with(|| item_icon(&exe, sc(48)))) };
+    let shell_icon = if exe.is_empty() || is_host(&exe) { null_mut() } else { exe_icon(w, &exe, sc(48)) };
     if !shell_icon.is_null() { return CopyIcon(shell_icon); }
     let window_icon = icon_of(w);
     if window_icon.is_null() { null_mut() } else { CopyIcon(window_icon) }

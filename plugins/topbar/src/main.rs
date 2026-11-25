@@ -1000,8 +1000,53 @@ unsafe fn win_icon(w: HWND) -> HICON {
         }
         return own(w);
     }
-    let ic = EXE_ICONS.with_borrow_mut(|m| *m.entry(exe.clone()).or_insert_with(|| item_icon(&exe, load_px())));
+    let ic = exe_icon(w, &exe, load_px());
     if ic.is_null() { own(w) } else { ic }
+}
+
+/// The shell's icon for the program of window `w`: a packaged app's (WhatsApp, Terminal...) comes from its package, as its exe
+/// often carries none; null when the exe has no icon of its own (the shell would answer with the blank-window one).
+unsafe fn exe_icon(w: HWND, exe: &str, px: i32) -> HICON {
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(w, &mut pid);
+    let app = if exe.contains(r"\windowsapps\") { aumid_of(pid) } else { None };
+    if let Some(id) = app {
+        let ic = cached_icon(&format!(r"shell:AppsFolder\{id}"), px);
+        if !ic.is_null() {
+            return ic;
+        }
+    }
+    if ExtractIconExW(wide(exe).as_ptr(), -1, null_mut(), null_mut(), 0) == 0 {
+        return null_mut();
+    }
+    cached_icon(exe, px)
+}
+
+/// `item_icon`, remembered; a failure is not, so the next look tries again.
+unsafe fn cached_icon(path: &str, px: i32) -> HICON {
+    let key = format!("{px}|{path}");
+    if let Some(ic) = EXE_ICONS.with_borrow(|m| m.get(&key).copied()) {
+        return ic;
+    }
+    let ic = item_icon(path, px);
+    if !ic.is_null() {
+        EXE_ICONS.with_borrow_mut(|m| m.insert(key, ic));
+    }
+    ic
+}
+
+/// The app id of a packaged process, None for an ordinary one.
+unsafe fn aumid_of(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
+    let p = OpenProcess(windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if p.is_null() {
+        return None;
+    }
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    let ok = GetApplicationUserModelId(p, &mut len, buf.as_mut_ptr()) == 0;
+    CloseHandle(p);
+    ok.then(|| wstr_of(&buf))
 }
 
 fn is_host(exe: &str) -> bool {
@@ -1011,26 +1056,13 @@ fn is_host(exe: &str) -> bool {
 
 /// Icon of the Store app behind an ApplicationFrameHost window (cached by app id), null if it cannot be found.
 unsafe fn store_icon(frame: HWND) -> HICON {
-    use windows_sys::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
     let core = FindWindowExW(frame, null_mut(), wide("Windows.UI.Core.CoreWindow").as_ptr(), null());
     if core.is_null() {
         return null_mut();
     }
     let mut pid = 0u32;
     GetWindowThreadProcessId(core, &mut pid);
-    let p = OpenProcess(windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-    if p.is_null() {
-        return null_mut();
-    }
-    let mut buf = [0u16; 256];
-    let mut len = buf.len() as u32;
-    let ok = GetApplicationUserModelId(p, &mut len, buf.as_mut_ptr()) == 0;
-    CloseHandle(p);
-    if !ok {
-        return null_mut();
-    }
-    let id = format!(r"shell:AppsFolder\{}", wstr_of(&buf));
-    EXE_ICONS.with_borrow_mut(|m| *m.entry(id.clone()).or_insert_with(|| item_icon(&id, load_px())))
+    aumid_of(pid).map_or(null_mut(), |id| cached_icon(&format!(r"shell:AppsFolder\{id}"), load_px()))
 }
 
 /// "c:\program files\windowsapps\claude_5.1.0.0_x64__pzs8\app\claude.exe" -> ("claude_pzs8", "app\claude.exe"):
@@ -1294,7 +1326,7 @@ thread_local! {
     static META: RefCell<HashMap<usize, (u32, u64, u64, String, Option<HICON>)>> = RefCell::new(HashMap::new()); // pid, first seen, read at
 }
 const META_TTL: u64 = 4000; // while a window is young
-const META_OLD: u64 = 60_000; // once it has been up for a while
+const META_OLD: u64 = 15_000; // once it has been up for a while
 
 unsafe fn win_id(w: HWND) -> String {
     let mut pid = 0u32;
