@@ -280,9 +280,17 @@ fn float_gap() -> i32 {
 fn side_gap() -> i32 {
     if airy() { sc(8) } else { 0 }
 }
+/// Corner radius of the Delphos bar, and the space between its edge and what is inside, logical px.
+const BAR_RAD: i32 = 16;
+const BAR_PAD: i32 = 5;
+/// Corners (as `fill` wants them: the diameter) of a highlight inside the bar. Corners one inside the other share a centre
+/// when inner radius = outer radius - the space between them.
+fn inner() -> i32 {
+    sc(if line_icons() { 2 * (BAR_RAD - BAR_PAD) } else { 8 })
+}
 /// Left edge of the gear.
 fn gear_left() -> i32 {
-    sc(GEAR_X.0) + side_gap()
+    if airy() { side_gap() + sc(BAR_PAD) } else { sc(GEAR_X.0) }
 }
 /// Width of one tray icon's slot.
 fn tcell() -> i32 {
@@ -1464,7 +1472,7 @@ fn layout(w: i32) -> Layout {
     let gap = sc(if airy() { 6 } else { 4 });
     // the Delphos style: date and time on one line, the battery as an icon alone
     let slim = airy();
-    let clock = (w - sc(if !slim { 96 } else if unsafe { clock_texts() }.0.len() > 5 { 172 } else { 148 }) - side_gap(), w - sc(6) - side_gap());
+    let clock = (w - sc(if !slim { 96 } else if unsafe { clock_texts() }.0.len() > 5 { 172 } else { 148 }) - side_gap(), w - sc(if slim { BAR_PAD } else { 6 }) - side_gap());
     let bat = BAT.get().0 >= 0;
     let sys = (clock.0 - sc(4) - sc(if slim { if bat { 170 } else { 134 } } else { 150 + if bat { 66 } else { 0 } }), clock.0 - sc(4));
     let apps = (sys.0 - tcell() * tray_count() as i32, sys.0);
@@ -2165,7 +2173,7 @@ unsafe fn paint(hwnd: HWND) {
     }
     let l = layout(cr.right);
     let fg = GetForegroundWindow();
-    let (top, bot) = if line_icons() { (sc(5), h - sc(5) - float_gap()) } else { (sc(4), h - sc(4)) };
+    let (top, bot) = if line_icons() { (sc(BAR_PAD), h - sc(BAR_PAD) - float_gap()) } else { (sc(4), h - sc(4)) };
     let mid = (top + bot) / 2;
     let cell = |x: i32, w: i32| RECT { left: x, top, right: x + w, bottom: bot };
     let hot = HOT.get();
@@ -2173,7 +2181,7 @@ unsafe fn paint(hwnd: HWND) {
 
     // the gear at the left end: the Style menu
     let gr = RECT { left: gear_left(), top, right: gear_left() + sc(GEAR_X.1), bottom: bot };
-    glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, sc(8));
+    glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, inner());
     SelectObject(dc, f_glyph);
     sym_t(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(GEAR, hot == GEAR), press_t(GEAR));
 
@@ -2200,20 +2208,20 @@ unsafe fn paint(hwnd: HWND) {
         let want = spot.map_or(PILL.get().0, |s| (l.x0 + s * (l.bw + l.gap)) as f32);
         let x = PILL.with(|c| follow(c, want, 45.0)) as i32;
         if near > 0.01 {
-            fill(dc, cell(x, l.bw), mix(pal().bg, pal().hover, near), sc(10));
+            fill(dc, cell(x, l.bw), mix(pal().bg, pal().hover, near), inner());
         }
     }
 
     // search button (left of Start)
     let sb = RECT { left: l.x0, top, right: l.x0 + l.bw, bottom: bot };
     if !line_icons() {
-        glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, sc(8));
+        glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, inner());
     }
     SelectObject(dc, f_glyph);
     sym_t(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, 2.0 * mag((sb.left + sb.right) as f32 / 2.0), press_t(SEARCH));
     let tb = RECT { left: l.x0 + l.bw + l.gap, top, right: l.x0 + 2 * l.bw + l.gap, bottom: bot };
     if !line_icons() {
-        glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, sc(8));
+        glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, inner());
     }
     sym_t(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { mix(pal().dim, pal().text, 0.5) }, 2.0 * mag((tb.left + tb.right) as f32 / 2.0), press_t(TASKVIEW));
 
@@ -2228,13 +2236,13 @@ unsafe fn paint(hwnd: HWND) {
             let m = mag(x as f32 + l.bw as f32 / 2.0);
             if line_icons() {
                 if ta > 0.01 || tp > 0.0 {
-                    fill(dc, r, mix(mix(mix(pal().bg, pal().hover, m.min(1.0)), active_bg, ta), pal().accent, 0.25 * tp), sc(10));
+                    fill(dc, r, mix(mix(mix(pal().bg, pal().hover, m.min(1.0)), active_bg, ta), pal().accent, 0.25 * tp), inner());
                 }
             } else if th > 0.01 || ta > 0.01 || tp > 0.0 {
-                fill(dc, r, mix(mix(mix(pal().bg, pal().hover, th), active_bg, ta), pal().accent, 0.5 * tp), sc(8));
+                fill(dc, r, mix(mix(mix(pal().bg, pal().hover, th), active_bg, ta), pal().accent, 0.5 * tp), inner());
             }
             if att {
-                fill(dc, r, mix(pal().bg, pal().accent, 0.4), sc(8));
+                fill(dc, r, mix(pal().bg, pal().accent, 0.4), inner());
             }
             if i == 0 && line_icons() {
                 win_logo(dc, r, icon_px() * 19 / 24, 1.8 * m, tp);
@@ -2286,7 +2294,7 @@ unsafe fn paint(hwnd: HWND) {
     fill(dc, RECT { left: l.apps.0 - sc(5), top: mid - sc(9), right: l.apps.0 - sc(5) + 1, bottom: mid + sc(9) }, pal().line, 0);
 
     // tray apps
-    glow(dc, TAPP, hot == TAPP, cell(l.apps.0, tcell()), pal().bg, pal().hover, sc(8));
+    glow(dc, TAPP, hot == TAPP, cell(l.apps.0, tcell()), pal().bg, pal().hover, inner());
     SelectObject(dc, f_glyph);
     let open_tf = IsWindowVisible(TRAYFLY.get()) != 0 || fly::is_open(fly::Kind::Tray);
     let turn = ease(hv(TF_KEY, open_tf)); // the chevron turns over as the flyout opens, and back
@@ -2298,7 +2306,7 @@ unsafe fn paint(hwnd: HWND) {
         for (k, &ix) in bar.iter().enumerate() {
             let (i, ti) = (k + 1, &t[ix]);
             let x = l.apps.0 + i as i32 * tcell();
-            glow(dc, TAPP + i as i32, hot == TAPP + i as i32, cell(x, tcell()), pal().bg, pal().hover, sc(8));
+            glow(dc, TAPP + i as i32, hot == TAPP + i as i32, cell(x, tcell()), pal().bg, pal().hover, inner());
             if !ti.icon.is_null() {
                 if glassy.is_some() {
                     icons.push((ti.icon, x as f32 + tcell() as f32 / 2.0, mid as f32, sc(16) as f32));
@@ -2311,11 +2319,11 @@ unsafe fn paint(hwnd: HWND) {
 
     // system group: language on its own, then one pill for wifi + volume + battery (like Windows 11: they open one panel)
     let tb = RECT { left: l.sys.0, top, right: l.sys.1, bottom: bot };
-    glow(dc, LANG, hot == LANG, RECT { left: tb.left, top, right: tb.left + sc(sys_ends().0), bottom: bot }, pal().bg, pal().hover, sc(8));
+    glow(dc, LANG, hot == LANG, RECT { left: tb.left, top, right: tb.left + sc(sys_ends().0), bottom: bot }, pal().bg, pal().hover, inner());
     let grp = RECT { left: tb.left + sc(sys_ends().0 + 2), top, right: tb.right, bottom: bot };
     let (tg, pg) = (hv(SYS_GRP, matches!(hot, WIFI_I | VOL_I | BAT_I) || fly::is_open(fly::Kind::Quick)), press_t(WIFI_I).max(press_t(VOL_I)).max(press_t(BAT_I)));
     if tg > 0.01 || pg > 0.0 {
-        fill(dc, grp, mix(mix(pal().bg, pal().hover, tg), pal().accent, 0.5 * pg), sc(8));
+        fill(dc, grp, mix(mix(pal().bg, pal().hover, tg), pal().accent, 0.5 * pg), inner());
     }
     let mut x = tb.left + sc(10);
     let at = |n: i32| tb.left + sc(74 + 36 * n); // center of the n-th status icon in the Delphos style
@@ -2356,7 +2364,7 @@ unsafe fn paint(hwnd: HWND) {
 
     // time (semibold) over the date (dimmed), or both on one line in the Delphos style
     let cb = cell(l.clock.0, l.clock.1 - l.clock.0);
-    glow(dc, CLOCK, hot == CLOCK || fly::is_open(fly::Kind::Cal), cb, pal().bg, pal().hover, sc(8));
+    glow(dc, CLOCK, hot == CLOCK || fly::is_open(fly::Kind::Cal), cb, pal().bg, pal().hover, inner());
     let (tm, dt) = clock_texts();
     if line_icons() {
         SelectObject(dc, f_bold);
@@ -2390,7 +2398,7 @@ unsafe fn paint(hwnd: HWND) {
 
     if let Some(d) = glassy {
         let slab = RECT { left: side_gap(), top: 0, right: cr.right - side_gap(), bottom: h - float_gap() };
-        glass::compose_bar(&d, glass::Slab { r: slab, rad: sc(14) as f32 });
+        glass::compose_bar(&d, glass::Slab { r: slab, rad: sc(BAR_RAD) as f32 });
         for &(ic, x, y, k) in &icons {
             app_icon(d.dc, ic, x, y, k);
             d.solid(RECT { left: (x - k / 2.0) as i32 - 1, top: (y - k / 2.0) as i32 - 1, right: (x + k / 2.0) as i32 + 2, bottom: (y + k / 2.0) as i32 + 2 });

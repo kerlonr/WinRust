@@ -137,12 +137,20 @@ fn frost(src: &[u32], w: usize, h: usize, tint: u32, k: f32) -> Vec<u32> {
     }
     let t = swap(tint);
     let t = [(t >> 16 & 255) as f32, (t >> 8 & 255) as f32, (t & 255) as f32];
-    for p in a.iter_mut() {
+    // the aurora of the Delphos app: a violet light at the upper left, an ice one at the lower right
+    let glow = |x: f32, y: f32, cx: f32, cy: f32| (-((x - cx) / 0.42).powi(2) - ((y - cy) / 0.75).powi(2)).exp();
+    for (n, p) in a.iter_mut().enumerate() {
+        let (x, y) = ((n % sw) as f32 / sw as f32, (n / sw) as f32 / sh as f32);
+        let (violet, ice) = (0.20 * glow(x, y, 0.12, 0.25), 0.15 * glow(x, y, 0.9, 0.85));
         let l = 0.3 * p[0] + 0.59 * p[1] + 0.11 * p[2];
         let hold = 1.0 - 0.45 * (l / 255.0); // light areas are pulled down so light text stays readable
         for (c, t) in p.iter_mut().zip(t) {
             let v = (l + (*c - l) * 1.7).clamp(0.0, 255.0) * hold;
             *c = v + (t - v) * k;
+        }
+        for (c, (v, i)) in p.iter_mut().zip([(157.0, 143.0), (140.0, 211.0), (255.0, 255.0)]) {
+            *c += (v - *c) * violet;
+            *c += (i - *c) * ice;
         }
     }
     let mut out = Vec::with_capacity(w * h);
@@ -345,9 +353,10 @@ mod tests {
     }
 
     #[test]
-    fn frosting_keeps_the_size_and_a_flat_picture_flat() {
+    fn frosting_keeps_the_size_and_is_smooth() {
         let out = frost(&vec![0x406080; 37 * 21], 37, 21, swap(0x1B1B1E), 0.5);
         assert_eq!(out.len(), 37 * 21);
-        assert!(out.iter().all(|&p| (p >> 8 & 255).abs_diff(out[0] >> 8 & 255) <= 1));
+        // no noise: neighbours differ by a step of the gradient at most
+        assert!(out.windows(2).enumerate().filter(|(i, _)| (i + 1) % 37 != 0).all(|(_, w)| (w[0] >> 8 & 255).abs_diff(w[1] >> 8 & 255) <= 4));
     }
 }

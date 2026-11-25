@@ -260,7 +260,7 @@ pub const PALS: [Pal; 9] = [
     // win7: Aero glass blue
     Pal { bg: rgb(31, 58, 96), line: rgb(72, 108, 154), hover: rgb(58, 92, 138), active: rgb(74, 112, 160), accent: rgb(120, 190, 255), text: rgb(255, 255, 255), dim: rgb(176, 198, 226) },
     // delphos: graphite with the ice blue of its OLED
-    Pal { bg: rgb(27, 27, 30), line: rgb(51, 50, 56), hover: rgb(42, 42, 47), active: rgb(48, 48, 54), accent: rgb(143, 211, 255), text: rgb(240, 239, 244), dim: rgb(150, 148, 160) },
+    Pal { bg: rgb(25, 25, 31), line: rgb(54, 53, 62), hover: rgb(45, 45, 51), active: rgb(55, 55, 62), accent: rgb(143, 211, 255), text: rgb(245, 244, 249), dim: rgb(170, 168, 182) },
 ];
 
 /// Status colours shared by every style (Apple's dark-mode system green, yellow, red).

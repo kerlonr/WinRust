@@ -632,7 +632,7 @@ unsafe fn wifi_join(n: &Net, pass: &str) {
 
 fn size(k: Kind) -> (i32, i32) {
     match k {
-        Kind::Quick if line_icons() => (344, 226 + 40 * sliders()),
+        Kind::Quick if line_icons() => (336, 218 + 40 * sliders()),
         Kind::Quick => (360, 252 + 44 * sliders()),
         Kind::Cal => (330, 340),
         Kind::Wifi => (360, wifi_rows().2),
@@ -701,17 +701,17 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
     match k {
         Kind::Quick if line_icons() => {
             // two wide tiles, then four small ones with a caption under each
-            let mut v: Vec<_> = (0..2).map(|i| (r(16 + 160 * i, 16, 168 + 160 * i, 78), Act::Tile(i as u8))).collect();
-            v.push((r(136, 33, 164, 61), Act::WifiMore));
-            v.extend((0..4).map(|i| (r(16 + 80 * i, 88, 88 + 80 * i, 134), Act::Tile(2 + i as u8))));
-            let mut y = 164;
+            let mut v: Vec<_> = (0..2).map(|i| (r(12 + 160 * i, 12, 164 + 160 * i, 74), Act::Tile(i as u8))).collect();
+            v.push((r(130, 29, 158, 57), Act::WifiMore));
+            v.extend((0..4).map(|i| (r(12 + 80 * i, 82, 84 + 80 * i, 130), Act::Tile(2 + i as u8))));
+            let mut y = 158;
             if BRIGHT.load(Relaxed) >= 0 {
-                v.push((r(16, y, w - 16, y + 40), Act::BrightSlide));
+                v.push((r(12, y, w - 12, y + 40), Act::BrightSlide));
                 y += 40;
             }
-            v.push((r(16, y, w - 16, y + 40), Act::VolSlide));
-            v.push((r(16, y, 50, y + 40), Act::Mute)); // on top of the capsule's end
-            v.push((r(w - 50, h - 48, w - 14, h - 12), Act::Settings("ms-settings:")));
+            v.push((r(12, y, w - 12, y + 40), Act::VolSlide));
+            v.push((r(12, y, 46, y + 40), Act::Mute)); // on top of the capsule's end
+            v.push((r(w - 48, h - 46, w - 12, h - 10), Act::Settings("ms-settings:")));
             v
         }
         Kind::Quick => {
@@ -1357,6 +1357,21 @@ unsafe fn track(dc: HDC, rc: RECT, frac: f32) {
     fill(dc, RECT { left: x - kr, top: m - kr, right: x + kr, bottom: m + kr }, if style().light() { rgb(255, 255, 255) } else { mix(pal().text, card(), 0.04) }, 2 * kr);
 }
 
+/// Corner radius of a panel, logical px. What sits in its corners has this minus its distance from the edge.
+fn panel_rad(k: Kind) -> i32 {
+    match k {
+        Kind::Quick => 26,         // tiles 12 away: 14
+        Kind::Tray => 20,          // rows 8 away: 12
+        Kind::Wifi | Kind::Start => 22, // rows 12 away: 10
+        Kind::Cal => 22,
+        Kind::Menu => 16,          // rows 6 away: 10
+    }
+}
+/// Corners (diameter) of something `gap` away from the edge of panel `k`; `old` in the other styles.
+fn nested(k: Kind, gap: i32, old: i32) -> i32 {
+    sc(if line_icons() { 2 * (panel_rad(k) - gap) } else { old })
+}
+
 const TW: i32 = 320; // background apps: panel width, row height, rows shown at once
 const TROW: i32 = 50;
 const TROWS: usize = 8;
@@ -1543,7 +1558,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 let base = mix(mix(pal().bg, pal().text, 0.08 + 0.05 * th), mix(pal().accent, pal().text, 0.12 * th), lit);
                 let seen = |c: u32| mix(pal().bg, c, t);
                 let body = inset(rc, (p * sc(3) as f32) as i32);
-                fill(dc, body, seen(base), sc(28));
+                fill(dc, body, seen(base), nested(k, 12, 28));
                 let ink = seen(mix(mix(pal().dim, pal().text, 0.8), pal().bg, on));
                 if i >= 2 {
                     SelectObject(dc, f_glyph);
@@ -1579,7 +1594,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 text(dc, if i == 0 { wsub.as_str() } else { bsub }, RECT { left: rc.left + sc(50), right, top: mid, bottom: mid + sc(17) }, seen(pal().dim), DT_LEFT);
             }
             let bright = BRIGHT.load(Relaxed);
-            let mut y = 164;
+            let mut y = 158;
             for (n, (slider, glyph, value, off)) in [
                 (Act::BrightSlide, "\u{E706}", bright as f32 / 100.0, false),
                 (Act::VolSlide, vol_glyph(vol, muted), if muted { 0.0 } else { vol.max(0) as f32 / 100.0 }, muted),
@@ -1597,22 +1612,22 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 capsule(dc, rc, shown, grab, t);
                 // the icon sits in the filled end, the number in the empty one
                 SelectObject(dc, f_glyph);
-                sym(dc, glyph, r(20, y + d, 48, y + 40 + d), if off { seen(BAD) } else if shown > 0.04 { seen(mix(pal().bg, pal().text, 0.12)) } else { seen(pal().dim) });
+                sym(dc, glyph, r(16, y + d, 44, y + 40 + d), if off { seen(BAD) } else if shown > 0.04 { seen(mix(pal().bg, pal().text, 0.12)) } else { seen(pal().dim) });
                 SelectObject(dc, f_small);
-                text(dc, &format!("{}%", (shown * 100.0).round() as i32), r(w - 70, y + d, w - 28, y + 40 + d), seen(if shown > 0.86 { mix(pal().bg, pal().text, 0.3) } else { pal().dim }), DT_RIGHT);
+                text(dc, &format!("{}%", (shown * 100.0).round() as i32), r(w - 66, y + d, w - 24, y + 40 + d), seen(if shown > 0.86 { mix(pal().bg, pal().text, 0.3) } else { pal().dim }), DT_RIGHT);
                 y += 40;
             }
             // footer: battery on the left, settings on the right
             let t = rise(8);
             let seen = |c: u32| mix(pal().bg, c, t);
-            fill(dc, RECT { left: sc(16), right: sc(w - 16), top: sc(h - 57), bottom: sc(h - 57) + 1 }, seen(pal().line), 0);
+            fill(dc, RECT { left: sc(16), right: sc(w - 16), top: sc(h - 54), bottom: sc(h - 54) + 1 }, seen(pal().line), 0);
             let (pct, ac) = BAT.get();
             if pct >= 0 {
                 SelectObject(dc, f_glyph);
-                sym(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, r(16, h - 48, 48, h - 12), seen(if !ac && pct <= 15 { BAD } else { mix(pal().dim, pal().text, 0.7) }));
+                sym(dc, if ac { "\u{E83E}" } else { "\u{E83F}" }, r(12, h - 46, 48, h - 10), seen(if !ac && pct <= 15 { BAD } else { mix(pal().dim, pal().text, 0.7) }));
                 SelectObject(dc, f_small);
                 let s = if ac { format!("{pct}% · {}", t!("заряжается", "charging", ja: "充電中", pt: "na tomada", zh: "充电中")) } else { format!("{pct}%") };
-                text(dc, &s, r(54, h - 48, w - 64, h - 12), seen(pal().dim), DT_LEFT);
+                text(dc, &s, r(50, h - 46, w - 64, h - 10), seen(pal().dim), DT_LEFT);
             }
             let (gear, ga) = *rs.iter().find(|(_, a)| matches!(a, Act::Settings(_))).unwrap();
             g(ga, gear, pal().bg, mix(pal().bg, pal().text, 0.08), sc(36));
@@ -1841,12 +1856,12 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         let ink = |c: u32| mix(card, c, t);
                         let busy = joining.as_deref() == Some(n.ssid.as_str());
                         if n.connected {
-                            surface(dc, rc, card, sc(14));
+                            surface(dc, rc, card, nested(k, 12, 14));
                         } else if others.last() != Some(&i) && !line_icons() {
                             fill(dc, RECT { left: rc.left + sc(48), top: rc.bottom - 1, right: rc.right - sc(14), bottom: rc.bottom }, mix(card, pal().text, 0.08), 0);
                         }
                         let open = hot(Act::Net(i)) || (n.connected && hot(Act::NetOff));
-                        glow(dc, 1_710_000 + i as i32, hot(Act::Net(i)), RECT { left: rc.left + sc(4), top: rc.top + sc(4), right: rc.right - sc(4), bottom: rc.bottom - sc(4) }, card, mix(card, pal().text, 0.045), sc(10));
+                        glow(dc, 1_710_000 + i as i32, hot(Act::Net(i)), RECT { left: rc.left + sc(4), top: rc.top + sc(4), right: rc.right - sc(4), bottom: rc.bottom - sc(4) }, card, mix(card, pal().text, if line_icons() { 0.08 } else { 0.045 }), nested(k, 16, 10));
                         // signal arcs; while joining they sweep up one after another
                         let lit = if busy { BUSY.set(true); (now / 230 % 4) as i32 } else { arcs_lit(n.q) };
                         let online = !matches!(state, Link::NoInternet(_));
@@ -1914,7 +1929,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 });
             }
             if let Some(&(lr, la)) = rs.iter().find(|(_, a)| matches!(a, Act::Settings(_))) {
-                g(la, lr, pal().bg, mix(pal().bg, pal().text, 0.05), sc(10));
+                g(la, lr, pal().bg, mix(pal().bg, pal().text, if line_icons() { 0.08 } else { 0.05 }), nested(k, 12, 10));
                 SelectObject(dc, f_txt);
                 text(dc, t!("Параметры сети", "Network settings", ja: "ネットワーク設定", pt: "Configurações de rede", zh: "网络设置"), RECT { left: lr.left + sc(8), ..lr }, if line_icons() { mix(pal().dim, pal().text, hv(TILE_KEY + 41, hot(la))) } else { pal().accent }, DT_LEFT);
                 SelectObject(dc, f_gs);
@@ -1966,7 +1981,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 let key_h = 1_720_000 + row * 10;
                 let (th, p) = (hv(key_h, on), press_t(key_h));
                 let base = mix(pal().bg, pal().text, 0.08 * th + 0.06 * p);
-                fill(dc, inset(rc, (p * sc(2) as f32) as i32), seen(base), sc(20));
+                fill(dc, inset(rc, (p * sc(2) as f32) as i32), seen(base), nested(k, 8, 20));
                 let cy = (rc.top + rc.bottom) / 2;
                 if !ic.is_null() {
                     // pops in, swells under the pointer
@@ -2008,7 +2023,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             MHEAD.with_borrow(|hd| {
                 if let Some((ic, glyph, title, sub)) = hd {
                     let tile = r(14, 12, 48, 46);
-                    fill(dc, tile, mix(pal().bg, pal().accent, 0.16), sc(10));
+                    fill(dc, tile, mix(pal().bg, pal().accent, 0.16), if line_icons() { sc(20) } else { sc(10) });
                     if !ic.is_null() {
                         fly_icon(dc, *ic, (tile.left + tile.right) as f32 / 2.0, (tile.top + tile.bottom) as f32 / 2.0, sc(24) as f32);
                     } else {
@@ -2042,7 +2057,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         fill(dc, RECT { left: rc.left + sc(6), top: rc.top - sc(5), right: rc.right - sc(6), bottom: rc.top - sc(5) + 1 }, pal().line, 0);
                     }
                     let col = if it.danger { BAD } else { pal().text };
-                    glow(dc, 1_700_000 + i as i32, hot(*a), *rc, pal().bg, if it.danger { mix(pal().bg, BAD, 0.22) } else { pal().hover }, sc(8));
+                    glow(dc, 1_700_000 + i as i32, hot(*a), *rc, pal().bg, if it.danger { mix(pal().bg, BAD, 0.22) } else { pal().hover }, nested(k, 6, 8));
                     // plain text rows: a window's own icon is the only picture; the current choice gets an accent dot
                     let mut lx = rc.left + sc(14) + if line_icons() { (hv(1_700_000 + i as i32, hot(*a)) * sc(4) as f32) as i32 } else { 0 }; // steps aside for the pointer
                     if !it.icon.is_null() {
@@ -2115,9 +2130,9 @@ unsafe fn paint(hw: HWND, k: Kind) {
                         let sel = i == SEL.get(); // what Enter opens
                         if pulse > 0.0 || sel {
                             BUSY.set(BUSY.get() || pulse > 0.0);
-                            fill(dc, *rc, mix(if sel { mix(pal().bg, pal().accent, 0.14) } else { pal().bg }, pal().accent, 0.45 * pulse), sc(8));
+                            fill(dc, *rc, mix(if sel { mix(pal().bg, pal().accent, 0.14) } else { pal().bg }, pal().accent, 0.45 * pulse), nested(k, 12, 8));
                         }
-                        g(*a, *rc, if sel { mix(pal().bg, pal().accent, 0.14) } else { pal().bg }, if sel { mix(pal().hover, pal().accent, 0.18) } else { pal().hover }, sc(8));
+                        g(*a, *rc, if sel { mix(pal().bg, pal().accent, 0.14) } else { pal().bg }, if sel { mix(pal().hover, pal().accent, 0.18) } else { pal().hover }, nested(k, 12, 8));
                         if sel {
                             fill(dc, RECT { left: rc.left, top: rc.top + sc(10), right: rc.left + sc(3), bottom: rc.bottom - sc(10) }, pal().accent, sc(3));
                         }
@@ -2139,7 +2154,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     }
                     Act::Power(p) => {
                         let armed = CONFIRM.get() == p as i32;
-                        glow(dc, rc.top * 4096 + rc.left + 1_000_000, armed || hot(*a), *rc, pal().bg, if armed { BAD } else { pal().hover }, sc(8));
+                        glow(dc, rc.top * 4096 + rc.left + 1_000_000, armed || hot(*a), *rc, pal().bg, if armed { BAD } else { pal().hover }, nested(k, 12, 8));
                         SelectObject(dc, f_glyph);
                         text(dc, ["\u{E72E}", "\u{E708}", "\u{E777}", "\u{E7E8}"][p as usize], *rc, pal().text, DT_CENTER);
                     }
@@ -2161,7 +2176,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
     if let Some(d) = &glassy {
         let mut wr: RECT = zeroed();
         GetWindowRect(hw, &mut wr);
-        BACKDROP.with_borrow(|b| crate::glass::compose(d, b.as_ref(), wr.left, wr.top, crate::glass::Slab { r: cr, rad: sc(16) as f32 }));
+        BACKDROP.with_borrow(|b| crate::glass::compose(d, b.as_ref(), wr.left, wr.top, crate::glass::Slab { r: cr, rad: sc(panel_rad(k)) as f32 }));
         for (ic, x, y, k) in ICO.take() {
             app_icon(d.dc, ic, x, y, k);
             d.solid(RECT { left: (x - k / 2.0) as i32 - 1, top: (y - k / 2.0) as i32 - 1, right: (x + k / 2.0) as i32 + 2, bottom: (y + k / 2.0) as i32 + 2 });
