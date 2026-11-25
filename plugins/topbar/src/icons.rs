@@ -23,10 +23,7 @@ pub(crate) unsafe fn remember(ic: HICON, color: HBITMAP, px: i32) {
     let dc = GetDC(null_mut());
     let got = GetDIBits(dc, color, 0, px as u32, bits.as_mut_ptr() as *mut _, &mut bi, DIB_RGB_COLORS);
     ReleaseDC(null_mut(), dc);
-    let old = SMOOTH.with_borrow_mut(|m| m.remove(&(ic as usize))); // a handle used again for another icon
-    if let Some((b, _)) = old {
-        GdipDisposeImage(b as *mut GpImage);
-    }
+    forget_icon(ic); // a handle used again for another icon
     if got != px || ic.is_null() || bits.iter().all(|p| p >> 24 == 0) {
         return; // no alpha: DrawIconEx knows its mask
     }
@@ -35,6 +32,13 @@ pub(crate) unsafe fn remember(ic: HICON, color: HBITMAP, px: i32) {
     let fmt = if straight { 0x0026_200A } else { 0x000E_200B }; // PixelFormat32bppARGB / 32bppPARGB
     if GdipCreateBitmapFromScan0(px, px, px * 4, fmt, bits.as_ptr() as *const u8, &mut b) == 0 && !b.is_null() {
         SMOOTH.with_borrow_mut(|m| m.insert(ic as usize, (b, bits)));
+    }
+}
+
+/// Drops the smooth copy of an icon about to be destroyed.
+pub(crate) unsafe fn forget_icon(ic: HICON) {
+    if let Some((b, _)) = SMOOTH.with_borrow_mut(|m| m.remove(&(ic as usize))) {
+        GdipDisposeImage(b as *mut GpImage);
     }
 }
 

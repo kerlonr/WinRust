@@ -2599,6 +2599,7 @@ unsafe fn unpin(i: usize) {
         let _ = std::fs::write(unpinned_file(), t);
     }
     let _ = std::fs::remove_file(String::from_utf16_lossy(&p.lnk[..n]));
+    forget_icon(p.icon);
     DestroyIcon(p.icon);
 }
 
