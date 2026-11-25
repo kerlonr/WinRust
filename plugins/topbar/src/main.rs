@@ -282,7 +282,7 @@ fn sc(v: i32) -> i32 {
 }
 fn bar_h() -> i32 {
     let d = [-6, 0, 8][i18n::style::bar_size() as usize % 3]; // small / normal / large
-    if vert() { sc(60 + d) } else { sc(BAR_H + d + if line_icons() { 8 } else { 0 }) + float_gap() }
+    if vert() { sc(60 + d) } else { sc(BAR_H + d + if line_icons() { 10 } else { 0 }) + float_gap() }
 }
 /// The roomier spacing of the Delphos style (bottom bar only).
 fn airy() -> bool {
@@ -303,38 +303,46 @@ const BAR_PAD: i32 = 5;
 fn inner() -> i32 {
     sc(if line_icons() { 2 * (BAR_RAD - BAR_PAD) } else { 8 })
 }
+/// Side of the Delphos bar's cells: every button is a square (1:1), its icon in the middle.
+fn cell_h() -> i32 {
+    bar_h() - float_gap() - 2 * sc(BAR_PAD)
+}
+fn gear_w() -> i32 {
+    if airy() { cell_h() } else { sc(GEAR_X.1) }
+}
 /// Left edge of the gear.
 fn gear_left() -> i32 {
     if airy() { side_gap() + sc(BAR_PAD) } else { sc(GEAR_X.0) }
 }
 /// Width of one tray icon's slot.
 fn tcell() -> i32 {
-    sc(if airy() { 32 } else { 24 })
+    if airy() { cell_h() } else { sc(24) }
 }
 /// Right ends of the language, network and volume cells inside the system group, logical px.
 fn sys_ends() -> (i32, i32, i32) {
     (42, 74, 106)
 }
-/// The Delphos bar's status area, left to right: (element, x, width), logical px. One button opens the panel; a status has an
+/// The Delphos bar's status area, left to right: (element, x, width), pixels. One button opens the panel; a status has an
 /// icon of its own only while it wants attention (no internet, muted, battery low, more than one input language).
 fn status_slots() -> Vec<(i32, i32, i32)> {
     let mut v = vec![];
     if unsafe { GetKeyboardLayoutList(0, null_mut()) } > 1 {
-        v.push((LANG, 42));
+        v.push((LANG, 48));
     }
     if matches!(net(), Link::NoInternet(_) | Link::Offline) {
-        v.push((WIFI_I, 32));
+        v.push((WIFI_I, 0));
     }
     if VOL.get().1 {
-        v.push((VOL_I, 32));
+        v.push((VOL_I, 0));
     }
     if matches!(BAT.get(), (0..=20, false)) {
-        v.push((BAT_I, 34));
+        v.push((BAT_I, 0));
     }
-    v.push((CC, 36));
+    v.push((CC, 0));
     let mut x = 0;
     v.into_iter()
         .map(|(e, w)| {
+            let w = if w > 0 { sc(w) } else { cell_h() };
             x += w;
             (e, x - w, w)
         })
@@ -1520,12 +1528,12 @@ fn layout(w: i32) -> Layout {
     let slim = airy();
     let right = w - sc(if slim { BAR_PAD } else { 6 }) - side_gap();
     let clock = (if slim { right - unsafe { clock_w() } } else { w - sc(96) }, right);
-    let status = if slim { status_slots().iter().map(|s| s.2).sum() } else { 150 + if BAT.get().0 >= 0 { 66 } else { 0 } };
-    let sys = (clock.0 - sc(if slim { 2 } else { 4 }) - sc(status), clock.0 - sc(if slim { 2 } else { 4 }));
+    let status = if slim { status_slots().iter().map(|s| s.2).sum() } else { sc(150 + if BAT.get().0 >= 0 { 66 } else { 0 }) };
+    let sys = (clock.0 - sc(if slim { 2 } else { 4 }) - status, clock.0 - sc(if slim { 2 } else { 4 }));
     let apps = (sys.0 - tcell() * tray_count() as i32, sys.0);
     let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
     let n = BTNS.with_borrow(|b| b.len()) as i32 + lead(); // + the search and Task View slots
-    let full = sc(44 + if slim { 2 } else { 0 } + [-6, 0, 8][i18n::style::bar_size() as usize % 3]);
+    let full = if slim { cell_h() } else { sc(44 + [-6, 0, 8][i18n::style::bar_size() as usize % 3]) };
     if centered() {
         // half of Start and k buttons must fit between the middle and the tray side (the narrower one)
         let k = n / 2;
@@ -1546,7 +1554,11 @@ unsafe fn hit(hwnd: HWND, x: i32, y: i32) -> i32 {
     GetClientRect(hwnd, &mut r);
     // a side bar runs the same layout along its height
     let (x, l) = if vert() { (y, layout(r.bottom)) } else { (x, layout(r.right)) };
-    if x < gear_left() + sc(GEAR_X.1) {
+    hit_at(x, &l)
+}
+
+fn hit_at(x: i32, l: &Layout) -> i32 {
+    if x < gear_left() + gear_w() {
         return GEAR;
     }
     if x >= l.clock.1 {
@@ -1557,7 +1569,7 @@ unsafe fn hit(hwnd: HWND, x: i32, y: i32) -> i32 {
     }
     if x >= l.sys.0 && airy() {
         let d = x - l.sys.0;
-        return status_slots().into_iter().find(|s| d < sc(s.1 + s.2)).map_or(CC, |s| s.0);
+        return status_slots().into_iter().find(|s| d < s.1 + s.2).map_or(CC, |s| s.0);
     }
     if x >= l.sys.0 {
         let (d, e) = (x - l.sys.0, sys_ends());
@@ -1567,7 +1579,7 @@ unsafe fn hit(hwnd: HWND, x: i32, y: i32) -> i32 {
         return TAPP + (x - l.apps.0) / tcell();
     }
     let n = BTNS.with_borrow(|b| b.len()) as i32;
-    match (-lead()..n).find(|&i| (0..l.bw).contains(&(x - btn_x(&l, i)))) {
+    match (-lead()..n).find(|&i| (0..l.bw).contains(&(x - btn_x(l, i)))) {
         None => NONE,
         Some(-2) => SEARCH,
         Some(-1) => TASKVIEW,
@@ -2286,7 +2298,7 @@ unsafe fn paint(hwnd: HWND) {
     let active_bg = if line_icons() { pal().active } else { mix(pal().active, pal().accent, 0.12) }; // the focused app's button: a hint of the accent, not plain grey
 
     // the gear at the left end: the Style menu
-    let gr = RECT { left: gear_left(), top, right: gear_left() + sc(GEAR_X.1), bottom: bot };
+    let gr = RECT { left: gear_left(), top, right: gear_left() + gear_w(), bottom: bot };
     glow(dc, GEAR, hot == GEAR, gr, pal().bg, pal().hover, inner());
     SelectObject(dc, f_glyph);
     let seen = if line_icons() { hv(4003, GEAR_NEAR.get() || hot == GEAR) } else { 1.0 }; // out of sight until the pointer comes near
@@ -2355,7 +2367,7 @@ unsafe fn paint(hwnd: HWND) {
             if !ic.is_null() {
                 if glassy.is_some() {
                     let k = icon_px().min(l.bw - sc(6)) as f32 * (1.0 - 0.08 * tp) * (0.55 + 0.45 * appear(key));
-                    icons.push((ic, x as f32 + l.bw as f32 / 2.0, (mid - sc(2)) as f32 - lift, k)); // after the glass: it would take an icon's dark parts for a thin layer
+                    icons.push((ic, x as f32 + l.bw as f32 / 2.0, (top + bot) as f32 / 2.0 - lift, k)); // after the glass: it would take an icon's dark parts for a thin layer
                 } else {
                     DrawIconEx(dc, x + (l.bw - isz) / 2, mid - isz / 2 - sc(2) - lift as i32, ic, isz, isz, 0, null_mut(), DI_NORMAL);
                 }
@@ -2364,7 +2376,7 @@ unsafe fn paint(hwnd: HWND) {
                 let min = b.wins.iter().all(|&w| IsIconic(w) != 0);
                 let dot = if line_icons() { 4 } else { 6 };
                 let pw = sc(dot) + (sc(12) as f32 * ta) as i32; // the running-app pill stretches when its window is active
-                let (py, ph) = (bot - sc(4), if line_icons() { sc(dot).min(sc(3) + 1) } else { sc(3) });
+                let (py, ph) = (bot - sc(if line_icons() { 5 } else { 4 }), if line_icons() { sc(dot).min(sc(3) + 1) } else { sc(3) });
                 let col = if act || att { pal().accent } else if min { mix(pal().dim, pal().bg, 0.45) } else { pal().dim };
                 fill(dc, RECT { left: x + (l.bw - pw) / 2, top: py, right: x + (l.bw + pw) / 2, bottom: py + ph }, col, sc(4));
                 if b.wins.len() > 1 && !line_icons() {
@@ -2406,7 +2418,7 @@ unsafe fn paint(hwnd: HWND) {
 
     if line_icons() {
         for (e, x, w) in status_slots() {
-            let r = cell(l.sys.0 + sc(x), sc(w));
+            let r = cell(l.sys.0 + x, w);
             let (on, p) = (hot == e || (e == CC && fly::is_open(fly::Kind::Quick)), press_t(e));
             glow(dc, e, on, r, pal().bg, pal().hover, inner());
             let ink = mix(icon_ink(), pal().text, hv(e, on));
@@ -2612,6 +2624,19 @@ unsafe fn shell_open(p: &str) -> bool {
         app.ShellExecute(&BSTR::from(p), &none, &none, &none, &none)
     })()
     .is_ok()
+}
+
+/// Windows' own popup menus (a Start item's right click, what tray icons do not draw themselves) follow the dark styles.
+unsafe fn dark_menus() {
+    if style().light() {
+        return;
+    }
+    // uxtheme's SetPreferredAppMode / FlushMenuThemes have no names, only numbers
+    let ux = LoadLibraryW(wide("uxtheme.dll").as_ptr());
+    if let (Some(mode), Some(flush)) = (GetProcAddress(ux, 135usize as *const u8), GetProcAddress(ux, 136usize as *const u8)) {
+        std::mem::transmute::<_, unsafe extern "system" fn(i32) -> i32>(mode)(2); // ForceDark
+        std::mem::transmute::<_, unsafe extern "system" fn()>(flush)();
+    }
 }
 
 /// The logon task starts the bar below normal priority (the Task Scheduler's default), with slow disk and memory priority, and
@@ -3181,7 +3206,7 @@ unsafe fn min_rect(info: *mut ShellHookInfo, bar: HWND) {
 unsafe fn tip_cx(l: &Layout, h: i32) -> i32 {
     // along the bar: screen x for a bottom bar, screen y for a side bar
     (if vert() { 0 } else { bar_x_w().0 }) + match h {
-        GEAR => gear_left() + sc(GEAR_X.1 / 2),
+        GEAR => gear_left() + gear_w() / 2,
         SEARCH => l.x0 + l.bw / 2,
         TASKVIEW => l.x0 + (l.bw + l.gap) + l.bw / 2,
         CLOCK => (l.clock.0 + l.clock.1) / 2,
@@ -3189,8 +3214,8 @@ unsafe fn tip_cx(l: &Layout, h: i32) -> i32 {
         LANG | WIFI_I | VOL_I | BAT_I | CC if airy() => {
             // a status without an icon of its own answers from the status button
             let v = status_slots();
-            let s = v.iter().find(|s| s.0 == h).or(v.last()).copied().unwrap_or((CC, 0, 36));
-            l.sys.0 + sc(s.1 + s.2 / 2)
+            let s = v.iter().find(|s| s.0 == h).or(v.last()).copied().unwrap_or((CC, 0, cell_h()));
+            l.sys.0 + s.1 + s.2 / 2
         }
         LANG => l.sys.0 + sc(sys_ends().0 / 2),
         WIFI_I => l.sys.0 + sc(sys_ends().1 - 17),
@@ -3419,6 +3444,12 @@ unsafe fn preview_bar() {
             InvalidateRect(h, null(), 0);
             return 0;
         }
+        if m == WM_MOUSEMOVE {
+            let x = (l & 0xffff) as i16 as i32;
+            HOT.set(hit(h, x, (l >> 16) as i16 as i32));
+            GEAR_NEAR.set(x < sc(180));
+            InvalidateRect(h, null(), 0);
+        }
         DefWindowProcW(h, m, w, l)
     }
     load_pins();
@@ -3449,7 +3480,7 @@ fn main() {
             screenshot();
             return;
         }
-        // `topbar --preview quick|wifi|cal|menu|tray|bar`: one flyout (or the bar, painted only) on its own (no bar, no hooks), to look at a style change; the process is closed by hand
+        // `topbar --preview quick|wifi|cal|menu|tray|start|bar`: one flyout (or the bar, painted only) on its own (no bar, no hooks), to look at a style change; the process is closed by hand
         if let Some(p) = std::env::args().skip_while(|a| a != "--preview").nth(1) {
             SetProcessDPIAware();
             let (mut tok, mut inp): (usize, GdiplusStartupInput) = (0, zeroed());
@@ -3465,12 +3496,17 @@ fn main() {
             if GetSystemPowerStatus(&mut s) != 0 && s.BatteryFlag & 128 == 0 && s.BatteryLifePercent <= 100 {
                 BAT.set((s.BatteryLifePercent as i32, s.ACLineStatus == 1));
             }
+            dark_menus();
             fly::init(GetModuleHandleW(null()));
             fly::PREVIEW.store(true, Relaxed);
             match p.as_str() {
                 "bar" => preview_bar(),
                 "wifi" => fly::toggle(fly::Kind::Wifi),
                 "cal" => fly::toggle(fly::Kind::Cal),
+                "start" => {
+                    fly::load_apps();
+                    fly::toggle(fly::Kind::Start);
+                }
                 "menu" => style_menu(),
                 "tray" => {
                     // no tray host here: the open windows stand in for tray icons; TOPBAR_TRAYTEST=hwnd,uid,message adds a real one
@@ -3509,6 +3545,7 @@ fn main() {
             return;
         }
         normal_priority();
+        dark_menus();
         // `topbar --open <path>`: opens it the way a pin does, through the running Explorer; exit code 1 = that did not work
         if let Some(p) = std::env::args().skip_while(|a| a != "--open").nth(1) {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -3627,6 +3664,39 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // run with WINRUST_STYLE=delphos: every element of the bar is found where it is drawn, at each bar size and scale
+    #[test]
+    fn delphos_bar_hits_what_it_draws() {
+        use super::*;
+        if !airy() {
+            return;
+        }
+        BTNS.set((0..9).map(|_| Btn { pin: None, wins: vec![], icon: null_mut() }).collect());
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            SCALE.set(scale);
+            for (bat, muted) in [((-1, false), false), ((90, false), false), ((12, false), true)] {
+                BAT.set(bat);
+                VOL.set((50, muted));
+                for w in [(1280.0 * scale) as i32, (1920.0 * scale) as i32] {
+                    let l = layout(w);
+                    assert_eq!(l.bw, cell_h(), "square cells at {scale}");
+                    assert!((btn_x(&l, 0) + l.bw / 2 - w / 2).abs() <= 1, "Start in the middle"); // an odd width has no middle pixel
+                    let mut all = vec![GEAR, CLOCK, TAPP];
+                    all.extend(0..9);
+                    all.extend(status_slots().iter().map(|s| s.0));
+                    for h in all {
+                        let x = unsafe { tip_cx(&l, h) };
+                        assert_eq!(hit_at(x, &l), h, "element {h} at x {x}, width {w}, scale {scale}");
+                    }
+                    // nothing overlaps: gear, apps, tray, status, clock from left to right
+                    let left = (0..9).map(|i| btn_x(&l, i)).min().unwrap();
+                    let right = (0..9).map(|i| btn_x(&l, i) + l.bw).max().unwrap();
+                    assert!(gear_left() + gear_w() < left && right <= l.apps.0 && l.apps.1 <= l.sys.0 && l.sys.1 <= l.clock.0 && l.clock.1 <= w);
+                }
+            }
+        }
+    }
+
     #[test]
     fn apps_spread_to_both_sides_of_start() {
         assert_eq!((0..7).map(super::side_slot).collect::<Vec<_>>(), [0, 1, -1, 2, -2, 3, -3]);

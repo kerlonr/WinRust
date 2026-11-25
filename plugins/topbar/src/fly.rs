@@ -1,6 +1,8 @@
 // Own flyouts instead of the stock Windows ones: Start (search + all apps + power), Wi-Fi, volume, battery
 // (+ brightness), calendar. One popup window; what it shows depends on `Kind`.
 use super::*;
+#[path = "start.rs"]
+mod start;
 use std::sync::Mutex;
 use std::{
     collections::HashMap,
@@ -17,7 +19,7 @@ pub enum Kind {
     Tray, // apps in the background (Delphos style; the others have the icon grid)
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Act {
     VolSlide,
     BrightSlide,
@@ -33,6 +35,10 @@ enum Act {
     Tray(usize),    // index into tray_list()
     TrayPin(usize), // keep on the bar, or not
     TrayEnd(usize), // end the app (two clicks)
+    Hit(usize),  // Delphos Start: an item of the grid or the results
+    AllApps,     // all apps <-> pinned
+    Explorer,
+    PowerMenu,
     CalPrev,
     CalNext,
     CalToday,
@@ -117,6 +123,7 @@ thread_local! {
     static SCROLL: Cell<usize> = const { Cell::new(0) };
     static SELALL: Cell<bool> = const { Cell::new(false) }; // Ctrl+A in the search: the next key replaces the query
     static ICONS: RefCell<HashMap<Vec<u16>, HICON>> = RefCell::new(HashMap::new()); // by path: the app list is reloaded and reordered
+    static SEL_SHOWN: Cell<bool> = const { Cell::new(false) }; // the arrow keys were used in the grid: the selected app is marked
     static SEL: Cell<usize> = const { Cell::new(0) }; // Start: the row Enter opens (arrow keys move it)
     static OVER: Cell<Option<Act>> = const { Cell::new(None) };
     static DRAG: Cell<u8> = const { Cell::new(0) }; // 0 none, 1 volume slider, 2 brightness slider
@@ -636,6 +643,7 @@ fn size(k: Kind) -> (i32, i32) {
         Kind::Quick => (360, 252 + 44 * sliders()),
         Kind::Cal => (330, 340 + cal_top()),
         Kind::Wifi => (360, wifi_rows().2),
+        Kind::Start if line_icons() => (start::W, start::H),
         Kind::Start => (560, 640),
         Kind::Menu => (MW, menu_rows().1),
         Kind::Tray => (TW, 54 + TROW * (tray_list().len().clamp(1, TROWS) as i32) + 10),
@@ -736,7 +744,13 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
         }
         Kind::Cal => {
             let o = cal_top();
-            vec![(r(w - 84, 10 + o, w - 52, 42 + o), Act::CalPrev), (r(w - 48, 10 + o, w - 16, 42 + o), Act::CalNext), (r(16, 10 + o, w - 100, 42 + o), Act::CalToday)]
+            let mut v = vec![(r(w - 84, 10 + o, w - 52, 42 + o), Act::CalPrev), (r(w - 48, 10 + o, w - 16, 42 + o), Act::CalNext)];
+            if !line_icons() {
+                v.push((r(16, 10 + o, w - 100, 42 + o), Act::CalToday));
+            } else if CAL.get() != this_month() {
+                v.push((r(w - 152, 12 + o, w - 92, 40 + o), Act::CalToday)); // only when there is somewhere to go back to
+            }
+            v
         }
         Kind::Wifi => {
             let rows = wifi_rows().0;
@@ -765,6 +779,7 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
             let heads: Vec<bool> = MITEMS.with_borrow(|m| m.iter().map(|it| it.head).collect());
             menu_rows().0.into_iter().enumerate().filter(|(i, _)| !heads[*i]).map(|(i, (t, b))| (r(6, t, w - 6, b), Act::Menu(i as u8))).collect()
         }
+        Kind::Start if line_icons() => start::rects(),
         Kind::Start => {
             let f = filtered();
             let s = SCROLL.get();
@@ -1000,6 +1015,9 @@ pub fn toggle(k: Kind) {
         HV.with_borrow_mut(|m| m.retain(|k, _| *k < 1_000_000)); // flyout keys are >= 1_000_000: no stale glow from the last panel
         GLIDE.with_borrow_mut(|m| m.retain(|k, _| *k < 1_000_000));
         TMENU.set((0, 0));
+        start::ALL.set(false);
+        start::PMENU.set(0);
+        SEL_SHOWN.set(false);
         CAL_TURN.set((0, 0));
         CTX.set(None);
         QUERY.set(String::new());
@@ -1255,6 +1273,8 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
             CAL_TURN.set((if a == Act::CalNext { 1 } else { -1 }, now_ms()));
         }
         Act::CalToday => {
+            let (y, m) = CAL.get();
+            CAL_TURN.set((if (y, m) < this_month() { 1 } else { -1 }, now_ms()));
             let mut t: SYSTEMTIME = zeroed();
             GetLocalTime(&mut t);
             CAL.set((t.wYear as i32, t.wMonth as i32));
@@ -1297,13 +1317,32 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
                 _ => {}
             }
         }
+        Act::Hit(i) => {
+            if start::run(i) {
+                close();
+            }
+        }
+        Act::AllApps => {
+            start::ALL.set(!start::ALL.get());
+            SCROLL.set(0);
+            SEL.set(0);
+            T0.set(now_ms()); // the other list comes in like the first one did
+        }
+        Act::Explorer => {
+            start::explorer();
+            close();
+        }
+        Act::PowerMenu => start::PMENU.set(if start::PMENU.get() == 0 { now_ms() } else { 0 }),
         Act::App(i) => {
             if launch(i) {
                 close();
             }
         }
         Act::Power(p) => {
-            if p >= 2 && CONFIRM.get() != p as i32 {
+            if PREVIEW.load(Relaxed) {
+                return; // a picture of the panel: nothing happens to the computer
+            }
+            if p >= 2 && !line_icons() && CONFIRM.get() != p as i32 {
                 CONFIRM.set(p as i32); // first click only arms it
                 return;
             }
@@ -1360,6 +1399,14 @@ unsafe fn track(dc: HDC, rc: RECT, frac: f32) {
     let kr = sc(10);
     fill(dc, RECT { left: x - kr - 1, top: m - kr, right: x + kr + 1, bottom: m + kr + sc(2) }, mix(card(), 0, 0.22), 2 * kr + 2);
     fill(dc, RECT { left: x - kr, top: m - kr, right: x + kr, bottom: m + kr }, if style().light() { rgb(255, 255, 255) } else { mix(pal().text, card(), 0.04) }, 2 * kr);
+}
+
+fn this_month() -> (i32, i32) {
+    unsafe {
+        let mut t: SYSTEMTIME = zeroed();
+        GetLocalTime(&mut t);
+        (t.wYear as i32, t.wMonth as i32)
+    }
 }
 
 /// Height of the calendar's header: the time and the whole date (Delphos style), logical px.
@@ -1754,8 +1801,24 @@ unsafe fn paint(hw: HWND, k: Kind) {
             SelectObject(dc, f_title);
             text(dc, &month_title(y, m), r(20, 10 + o, w - 100, 42 + o), pal().text, DT_LEFT);
             SelectObject(dc, f_glyph);
-            sym(dc, "\u{E70E}", r(w - 84, 10 + o, w - 52, 42 + o), pal().text);
-            sym(dc, "\u{E70D}", r(w - 48, 10 + o, w - 16, 42 + o), pal().text);
+            if line_icons() {
+                for (b, a) in rects(k) {
+                    let (h, p) = (hv(1_730_000 + b.left, hot(a)), press_t(1_730_000 + b.left));
+                    fill(dc, b, mix(pal().bg, pal().text, 0.05 + 0.07 * h), sc(32));
+                    let ink = mix(mix(pal().dim, pal().text, 0.6), pal().text, h);
+                    if a == Act::CalToday {
+                        SelectObject(dc, f_small);
+                        text(dc, t!("Сегодня", "Today", ja: "今日", pt: "Hoje", zh: "今天"), b, ink, DT_CENTER);
+                    } else {
+                        SelectObject(dc, f_gs);
+                        sym_t(dc, if a == Act::CalPrev { "\u{E76B}" } else { "\u{E76C}" }, b, ink, 0.0, p);
+                    }
+                }
+                SelectObject(dc, f_glyph);
+            } else {
+                sym(dc, "\u{E70E}", r(w - 84, 10 + o, w - 52, 42 + o), pal().text);
+                sym(dc, "\u{E70D}", r(w - 48, 10 + o, w - 16, 42 + o), pal().text);
+            }
             SelectObject(dc, f_small);
             for (i, d) in weekday_initials().iter().enumerate() {
                 text(dc, d, r(18 + 42 * i as i32, 54 + o, 60 + 42 * i as i32, 78 + o), pal().dim, DT_CENTER);
@@ -2118,6 +2181,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 }
             });
         }
+        Kind::Start if line_icons() => start::paint(dc, &start::Fonts { txt: f_txt, small: f_small, glyph: f_glyph, semi: f_semi }, over),
         Kind::Start => {
             surface(dc, r(20, 20, w - 20, 56), card, sc(36));
             SelectObject(dc, f_glyph);
@@ -2318,11 +2382,19 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_LBUTTONDOWN => {
             let hit = act_at(k, x, y);
-            if CTX.with_borrow(|c| c.is_some()) && !matches!(hit, Some((_, Act::Ctx(_)))) {
+            if k == Kind::Start && start::PMENU.get() != 0 && !matches!(hit, Some((_, Act::Power(_) | Act::PowerMenu))) {
+                start::PMENU.set(0); // a click beside the open menu only closes it
+            } else if CTX.with_borrow(|c| c.is_some()) && !matches!(hit, Some((_, Act::Ctx(_)))) {
                 CTX.set(None); // a click beside the open menu only closes it
             } else if let Some((rc, a)) = hit {
                 if let Act::Tray(i) = a {
                     press(1_720_000 + (i - SCROLL.get()) as i32 * 10);
+                }
+                if matches!(a, Act::CalPrev | Act::CalNext | Act::CalToday) {
+                    press(1_730_000 + rc.left);
+                }
+                if matches!(a, Act::Explorer | Act::PowerMenu | Act::Settings(_)) {
+                    press(1_800_010 + rc.left);
                 }
                 if let Act::Tile(i) = a {
                     press(TILE_KEY + i as i32);
@@ -2337,6 +2409,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
         WM_RBUTTONUP => {
             match (k, act_at(k, x, y)) {
                 (Kind::Tray, Some((_, Act::Tray(i) | Act::TrayPin(i) | Act::TrayEnd(i)))) => tray_do(i, false),
+                (Kind::Start, Some((_, Act::Hit(i)))) => start::menu(hw, i, x, y),
                 (Kind::Start, Some((_, Act::App(i)))) => app_menu(hw, i, x, y),
                 (Kind::Wifi, Some((_, Act::Net(_) | Act::NetOff))) if PASS.with_borrow(|p| p.is_none()) => {
                     let i = if let Some((_, Act::Net(i))) = act_at(k, x, y) { i } else { NETS.with_borrow(|n| n.iter().position(|n| n.connected)).unwrap_or(0) };
@@ -2369,8 +2442,16 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             match k {
                 Kind::Quick => add_volume(if up { 2 } else { -2 }),
                 Kind::Tray => SCROLL.set(if up { SCROLL.get().saturating_sub(1) } else { (SCROLL.get() + 1).min(tray_list().len().saturating_sub(TROWS)) }),
+                Kind::Start if line_icons() => start::scroll(up),
+                Kind::Cal if line_icons() => run_act(if up { Act::CalPrev } else { Act::CalNext }, zeroed(), 0),
                 Kind::Start => SCROLL.set(if up { SCROLL.get().saturating_sub(2) } else { (SCROLL.get() + 2).min(filtered().len().saturating_sub(ROWS)) }),
                 _ => {}
+            }
+            InvalidateRect(hw, null(), 0);
+        }
+        WM_KEYDOWN if k == Kind::Start && line_icons() && matches!(wp as u16, VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT) => {
+            if start::searching() || SEL_SHOWN.replace(true) {
+                start::arrow(wp as u16); // in the grid the first key only shows where the selection is
             }
             InvalidateRect(hw, null(), 0);
         }
@@ -2387,7 +2468,9 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
         WM_CHAR => {
             let c = wp as u32;
             if c == 27 {
-                if CTX.with_borrow(|c| c.is_some()) {
+                if start::PMENU.replace(0) != 0 {
+                    // Esc closes the power menu first
+                } else if CTX.with_borrow(|c| c.is_some()) {
                     CTX.set(None);
                 } else if PASS.with_borrow(|p| p.is_some()) {
                     PASS.set(None);
@@ -2414,7 +2497,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 }
             } else if k == Kind::Start {
                 if c == 13 {
-                    if launch(SEL.get()) {
+                    if if line_icons() { start::run(SEL.get()) } else { launch(SEL.get()) } {
                         close();
                         return 0;
                     }
@@ -2435,7 +2518,11 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     });
                     SCROLL.set(0);
                     SEL.set(0);
-                    find_loose_exes(hw);
+                    if line_icons() {
+                        start::search(hw);
+                    } else {
+                        find_loose_exes(hw);
+                    }
                 }
             }
             InvalidateRect(hw, null(), 0);
@@ -2443,6 +2530,96 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
         _ => return DefWindowProcW(hw, msg, wp, lp),
     }
     0
+}
+
+#[cfg(test)]
+mod delphos {
+    use super::*;
+
+    /// Run with WINRUST_STYLE=delphos: every button of every panel is inside it, big enough, and answers at its own centre.
+    #[test]
+    fn every_button_answers() {
+        if !line_icons() {
+            return;
+        }
+        let net = |ssid: &str, connected: bool| Net { ssid: ssid.into(), q: 80, secure: true, profile: None, connected, auth: 7, g: windows_sys::core::GUID::from_u128(0) };
+        NETS.set(vec![net("a", true), net("b", false), net("c", false)]);
+        MITEMS.set(vec![MItem::head("h"), MItem::new("x"), MItem::new("y").sep(), MItem::new("z").danger()]);
+        TAPPS.set((0..5).map(|i| TIcon { hwnd: (i + 1) as HWND, uid: 0, guid: [0; 16], icon: null_mut(), cb: 0, ver: 0, hidden: false, tip: String::new(), key: format!("k{i}") }).collect());
+        *APPS.lock().unwrap() = (0..40).map(|i| (format!("App {i}"), wide(&format!(r"C:\a{i}.lnk")))).collect();
+        let check = |k: Kind, what: &str| {
+            let (w, h) = (sc(size(k).0), sc(size(k).1));
+            let rs = rects(k);
+            assert!(!rs.is_empty(), "{what}");
+            for (b, a) in rs {
+                assert!(b.left >= 0 && b.top >= 0 && b.right <= w && b.bottom <= h, "{what}: {a:?} is outside ({},{},{},{}) of {w}x{h}", b.left, b.top, b.right, b.bottom);
+                assert!(b.right - b.left >= sc(24) && b.bottom - b.top >= sc(24), "{what}: {a:?} is too small to click");
+                let at = act_at(k, (b.left + b.right) / 2, (b.top + b.bottom) / 2).map(|x| x.1);
+                assert_eq!(at, Some(a), "{what}: the centre of {a:?}");
+            }
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            SCALE.set(scale);
+            for b in [-1, 50] {
+                BRIGHT.store(b, Relaxed);
+                check(Kind::Quick, "quick");
+            }
+            check(Kind::Wifi, "wifi");
+            check(Kind::Menu, "menu");
+            check(Kind::Tray, "tray");
+            CAL.set(this_month());
+            check(Kind::Cal, "calendar");
+            CAL.set((2020, 2));
+            check(Kind::Cal, "calendar, another month");
+            QUERY.set(String::new());
+            check(Kind::Start, "start");
+            start::ALL.set(true);
+            SCROLL.set(2);
+            check(Kind::Start, "start, all apps");
+            SCROLL.set(0);
+            QUERY.set("app".into());
+            check(Kind::Start, "start, results");
+            // the power menu lies over the list: it wins there
+            start::PMENU.set(1);
+            for (b, a) in rects(Kind::Start).into_iter().filter(|(_, a)| matches!(a, Act::Power(_))) {
+                assert_eq!(act_at(Kind::Start, (b.left + b.right) / 2, (b.top + b.bottom) / 2).map(|x| x.1), Some(a));
+            }
+            start::PMENU.set(0);
+            start::ALL.set(false);
+            QUERY.set(String::new());
+        }
+    }
+
+    /// Corners one inside the other never turn inside out.
+    #[test]
+    fn corners_nest() {
+        for (k, gap) in [(Kind::Quick, 12), (Kind::Tray, 8), (Kind::Wifi, 16), (Kind::Start, 12), (Kind::Menu, 6)] {
+            assert!(panel_rad(k) - gap >= 6);
+        }
+        assert!(BAR_RAD - BAR_PAD >= 6);
+    }
+
+    #[test]
+    fn months_turn_over_the_year() {
+        CAL.set((2026, 12));
+        unsafe { run_act(Act::CalNext, zeroed(), 0) };
+        assert_eq!(CAL.get(), (2027, 1));
+        unsafe { run_act(Act::CalPrev, zeroed(), 0) };
+        assert_eq!(CAL.get(), (2026, 12));
+        unsafe { run_act(Act::CalToday, zeroed(), 0) };
+        assert_eq!(CAL.get(), this_month());
+    }
+
+    /// Ending a background app takes two clicks, and the first does nothing else.
+    #[test]
+    fn ending_an_app_takes_two_clicks() {
+        TAPPS.set(vec![TIcon { hwnd: 1 as HWND, uid: 0, guid: [0; 16], icon: null_mut(), cb: 0, ver: 0, hidden: false, tip: String::new(), key: "x.exe".into() }]);
+        CONFIRM.set(-1);
+        unsafe { run_act(Act::TrayEnd(0), zeroed(), 0) };
+        assert_eq!((CONFIRM.get(), TAPPS.with_borrow(|t| t.len())), (100, 1));
+        unsafe { run_act(Act::TrayEnd(0), zeroed(), 0) };
+        assert_eq!(CONFIRM.get(), -1);
+    }
 }
 
 #[cfg(test)]
