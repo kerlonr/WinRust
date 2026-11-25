@@ -240,7 +240,7 @@ unsafe fn wallpaper(x: i32, y: i32, w: i32, h: i32) -> Option<Backdrop> {
         }
         GdipDisposeImage(img as *mut GpImage);
     }
-    let px = frost(d.pixels(), w as usize, h as usize, pal().bg, strength(), 0.5); // the wallpaper has its own colour
+    let px = frost(d.pixels(), w as usize, h as usize, pal().bg, strength(), 0.25); // the wallpaper has its own colour
     d.free();
     Some(Backdrop { x, y, w, h, px })
 }
@@ -266,7 +266,7 @@ pub(crate) unsafe fn compose(d: &Dib, back: Option<&Backdrop>, x: i32, y: i32, s
     let px = d.pixels();
     for (j, row) in px.chunks_exact_mut(w).enumerate().take(h) {
         let fy = j as f32 + 0.5;
-        let sheen = (255.0 * 0.07 * (1.0 - (fy - t) / sheen_h).clamp(0.0, 1.0)) as u32;
+        let sheen = (255.0 * 0.05 * (1.0 - (fy - t) / sheen_h).clamp(0.0, 1.0)) as u32;
         let rim = 255.0 * (0.30 - 0.20 * ((fy - t) / (b - t)).clamp(0.0, 1.0));
         let near_row = fy < t + slab.rad || fy > b - slab.rad;
         let line = back.and_then(|g| {

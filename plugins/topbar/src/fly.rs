@@ -634,7 +634,7 @@ fn size(k: Kind) -> (i32, i32) {
     match k {
         Kind::Quick if line_icons() => (336, 218 + 40 * sliders()),
         Kind::Quick => (360, 252 + 44 * sliders()),
-        Kind::Cal => (330, 340),
+        Kind::Cal => (330, 340 + cal_top()),
         Kind::Wifi => (360, wifi_rows().2),
         Kind::Start => (560, 640),
         Kind::Menu => (MW, menu_rows().1),
@@ -734,7 +734,10 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
             v.push((r(w - 54, h - 50, w - 14, h - 10), Act::Settings("ms-settings:")));
             v
         }
-        Kind::Cal => vec![(r(w - 84, 10, w - 52, 42), Act::CalPrev), (r(w - 48, 10, w - 16, 42), Act::CalNext), (r(16, 10, w - 100, 42), Act::CalToday)],
+        Kind::Cal => {
+            let o = cal_top();
+            vec![(r(w - 84, 10 + o, w - 52, 42 + o), Act::CalPrev), (r(w - 48, 10 + o, w - 16, 42 + o), Act::CalNext), (r(16, 10 + o, w - 100, 42 + o), Act::CalToday)]
+        }
         Kind::Wifi => {
             let rows = wifi_rows().0;
             let mut v: Vec<_> = rows.iter().enumerate().map(|(i, &(t, b))| (r(12, t, w - 12, b), Act::Net(i))).collect();
@@ -889,7 +892,9 @@ pub fn context_menu(x: i32) {
     if pu {
         items.insert(4, MItem::new(t!("Удалить мусор Windows (необратимо)", "Remove Windows junk (irreversible)", ja: "Windows の不要なものを削除 (元に戻せません)", pt: "Remover lixo do Windows (irreversível)", zh: "删除 Windows 垃圾文件（不可恢复）")).danger());
     }
+    items.insert(0, MItem::new(t!("Настройки панели", "Bar settings", ja: "バーの設定", pt: "Configurações da barra", zh: "任务栏设置")));
     menu(x, None, items, move |i| unsafe {
+        let Some(i) = i.checked_sub(1) else { return style_menu() };
         let i = if pu && i == 4 { 99 } else { i };
         match i {
             0 => open(&wide("ms-settings:")),
@@ -1357,6 +1362,11 @@ unsafe fn track(dc: HDC, rc: RECT, frac: f32) {
     fill(dc, RECT { left: x - kr, top: m - kr, right: x + kr, bottom: m + kr }, if style().light() { rgb(255, 255, 255) } else { mix(pal().text, card(), 0.04) }, 2 * kr);
 }
 
+/// Height of the calendar's header: the time and the whole date (Delphos style), logical px.
+fn cal_top() -> i32 {
+    if line_icons() { 92 } else { 0 }
+}
+
 /// Corner radius of a panel, logical px. What sits in its corners has this minus its distance from the edge.
 fn panel_rad(k: Kind) -> i32 {
     match k {
@@ -1721,14 +1731,34 @@ unsafe fn paint(hw: HWND, k: Kind) {
         }
         Kind::Cal => {
             let (y, m) = CAL.get();
+            let o = cal_top();
+            if o > 0 {
+                let mut st: SYSTEMTIME = zeroed();
+                GetLocalTime(&mut st);
+                let mut b = [0u16; 80];
+                let n = GetDateFormatW(0x0400, 2, &st, null(), b.as_mut_ptr(), 80).max(1) as usize - 1; // DATE_LONGDATE
+                let mut s = String::from_utf16_lossy(&b[..n]);
+                if let Some(c) = s.chars().next() {
+                    s = c.to_uppercase().chain(s.chars().skip(1)).collect();
+                }
+                let (t0, t1) = (rise(0), rise(1));
+                let f = font(&wide(if winrust_common::style::sans_face().contains("Variable") { "Segoe UI Variable Display" } else { "Segoe UI" }), 40, 300);
+                let of = SelectObject(dc, f);
+                text(dc, &clock_texts().0, drop_by(r(20, 12, w - 20, 60), t0), mix(pal().bg, pal().text, t0), DT_LEFT);
+                SelectObject(dc, f_txt);
+                text(dc, &s, drop_by(r(21, 58, w - 20, 80), t1), mix(pal().bg, pal().dim, t1), DT_LEFT);
+                SelectObject(dc, of);
+                DeleteObject(f);
+                fill(dc, RECT { left: sc(20), right: sc(w - 20), top: sc(92), bottom: sc(92) + 1 }, pal().line, 0);
+            }
             SelectObject(dc, f_title);
-            text(dc, &month_title(y, m), r(16, 10, w - 100, 42), pal().text, DT_LEFT);
+            text(dc, &month_title(y, m), r(20, 10 + o, w - 100, 42 + o), pal().text, DT_LEFT);
             SelectObject(dc, f_glyph);
-            sym(dc, "\u{E70E}", r(w - 84, 10, w - 52, 42), pal().text);
-            sym(dc, "\u{E70D}", r(w - 48, 10, w - 16, 42), pal().text);
+            sym(dc, "\u{E70E}", r(w - 84, 10 + o, w - 52, 42 + o), pal().text);
+            sym(dc, "\u{E70D}", r(w - 48, 10 + o, w - 16, 42 + o), pal().text);
             SelectObject(dc, f_small);
             for (i, d) in weekday_initials().iter().enumerate() {
-                text(dc, d, r(18 + 42 * i as i32, 54, 60 + 42 * i as i32, 78), pal().dim, DT_CENTER);
+                text(dc, d, r(18 + 42 * i as i32, 54 + o, 60 + 42 * i as i32, 78 + o), pal().dim, DT_CENTER);
             }
             let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
             let yy = if m < 3 { y - 1 } else { y };
@@ -1743,7 +1773,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             SelectObject(dc, f_txt);
             for d in 1..=dim {
                 let (col, row) = ((first + d - 1) % 7, (first + d - 1) / 7);
-                let mut cell = r(18 + 42 * col, 84 + 40 * row, 60 + 42 * col, 120 + 40 * row);
+                let mut cell = r(18 + 42 * col, 84 + o + 40 * row, 60 + 42 * col, 120 + o + 40 * row);
                 let today = now.wYear as i32 == y && now.wMonth as i32 == m && now.wDay as i32 == d;
                 let mut ink = pal().text;
                 if line_icons() {
@@ -1985,7 +2015,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 let cy = (rc.top + rc.bottom) / 2;
                 if !ic.is_null() {
                     // pops in, swells under the pointer
-                    let size = sc(22) as f32 * (0.5 + 0.5 * t) * (1.0 + 0.16 * th) * (1.0 - 0.14 * p);
+                    let size = sc(22) as f32 * (0.5 + 0.5 * t) * (1.0 - 0.08 * p);
                     fly_icon(dc, ic, (rc.left + sc(26)) as f32, cy as f32, size);
                 }
                 let armed = CONFIRM.get() == 100 + i as i32;

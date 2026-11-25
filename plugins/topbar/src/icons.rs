@@ -72,8 +72,8 @@ pub(crate) unsafe fn app_icon(dc: HDC, ic: HICON, cx: f32, cy: f32, size: f32) {
     DrawIconEx(dc, cx as i32 - s / 2, cy as i32 - s / 2, ic, s, s, 0, null_mut(), DI_NORMAL);
 }
 
-/// The Windows logo: four solid panes in one blue gradient, on whole pixels; a little bigger and brighter under the pointer
-/// (`t`), squeezed by a click (`p`).
+/// The Windows logo: four solid panes in one blue gradient, on whole pixels; a little brighter under the pointer (`t`),
+/// giving way to a click (`p`).
 pub(crate) unsafe fn win_logo(dc: HDC, r: RECT, size: i32, t: f32, p: f32) {
     let mut g: *mut GpGraphics = null_mut();
     if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
@@ -81,7 +81,7 @@ pub(crate) unsafe fn win_logo(dc: HDC, r: RECT, size: i32, t: f32, p: f32) {
     }
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
     GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
-    let want = size as f32 * (1.0 + 0.1 * t) * (1.0 - 0.16 * p);
+    let want = size as f32 * (1.0 - 0.08 * p);
     let gap = (want * 0.055).round().max(1.0);
     let pane = ((want - gap) / 2.0).round();
     let full = 2.0 * pane + gap;
@@ -107,6 +107,8 @@ pub(crate) unsafe fn win_logo(dc: HDC, r: RECT, size: i32, t: f32, p: f32) {
     GdipDeleteGraphics(g);
 }
 
+pub(crate) const CONTROL: &str = "control"; // not a font glyph: only the Delphos bar has it
+
 /// The style draws its own icons instead of the icon font's.
 pub(crate) fn line_icons() -> bool {
     style() == Style::Delphos
@@ -127,7 +129,7 @@ pub(crate) unsafe fn sym(dc: HDC, s: &str, r: RECT, c: u32) {
     sym_t(dc, s, r, c, 0.0, 0.0);
 }
 
-/// `sym` at hover progress `t` and click progress `p` (0..1): grows a little under the pointer, gives way to a click.
+/// `sym` at hover progress `t` (0..1; some icons move a part of themselves) and click progress `p` (gives way).
 pub(crate) unsafe fn sym_t(dc: HDC, s: &str, r: RECT, c: u32, t: f32, p: f32) {
     if !line_icons() || !draw(dc, s, r, c, t, p) {
         text(dc, s, r, c, DT_CENTER);
@@ -190,7 +192,7 @@ impl Ink {
 unsafe fn draw(dc: HDC, s: &str, r: RECT, c: u32, t: f32, press: f32) -> bool {
     let mut lf: LOGFONTW = zeroed();
     GetObjectW(GetCurrentObject(dc, OBJ_FONT as u32), size_of::<LOGFONTW>() as i32, &mut lf as *mut _ as *mut _);
-    let px = (lf.lfHeight.abs() as f32 * 1.125).max(10.0) * (1.0 + 0.1 * t) * (1.0 - 0.18 * press); // the 24-unit box keeps a margin the font's glyphs do not have
+    let px = (lf.lfHeight.abs() as f32 * 1.125).max(10.0) * (1.0 - 0.08 * press); // the 24-unit box keeps a margin the font's glyphs do not have
     let mut g: *mut GpGraphics = null_mut();
     if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
         return false;
@@ -229,8 +231,7 @@ unsafe fn shape(i: &Ink, s: &str) -> bool {
         }
         // task view: a window in front of another
         "\u{E7C4}" => {
-            let d = i.t; // the windows move apart under the pointer
-            i.rect(8.5 + d, 8.5 + d, 12.0, 12.0, 3.0, false);
+            i.rect(8.5, 8.5, 12.0, 12.0, 3.0, false);
             i.line(&[(3.5, 13.0), (3.5, 6.5)]);
             i.arc(6.5, 6.5, 3.0, 180.0, 90.0);
             i.line(&[(6.5, 3.5), (13.0, 3.5)]);
@@ -297,6 +298,13 @@ unsafe fn shape(i: &Ink, s: &str) -> bool {
             i.line(&[(14.0, 11.0), (17.0, 11.0)]);
             i.line(&[(7.0, 15.0), (8.5, 15.0)]);
             i.line(&[(11.5, 15.0), (17.0, 15.0)]);
+        }
+        // control center: two switches, one on and one off
+        CONTROL => {
+            i.rect(3.0, 4.2, 18.0, 6.8, 3.4, false);
+            i.dot(6.6, 7.6, 1.7);
+            i.rect(3.0, 13.0, 18.0, 6.8, 3.4, false);
+            i.dot(17.4, 16.4, 1.7);
         }
         // pin
         "\u{E718}" => {
