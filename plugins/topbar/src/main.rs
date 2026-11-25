@@ -229,6 +229,12 @@ thread_local! {
     static SHOWN: RefCell<Option<Vec<String>>> = const { RefCell::new(None) }; // tray icons kept on the bar (by exe); None = none: every tray icon lives in the chevron flyout
     static TRAYFLY: Cell<HWND> = const { Cell::new(null_mut()) };
     static TF_ANIM: Cell<(u64, i32, i32)> = const { Cell::new((0, 0, 0)) }; // tray flyout: when it opened, its final x, y
+    static TIP_ANIM: Cell<(u64, i32, i32)> = const { Cell::new((0, 0, 0)) }; // tooltip: when it showed, its place
+    static TRAY_DOWN: Cell<i32> = const { Cell::new(NONE) }; // tray icon of the bar the button went down on
+    static MOUSE_X: Cell<f32> = const { Cell::new(0.0) }; // the pointer along the bar
+    static MAG_X: Cell<(f32, u64)> = const { Cell::new((0.0, 0)) }; // where the magnifier is: it follows the pointer softly
+    static PILL: Cell<(f32, u64)> = const { Cell::new((0.0, 0)) }; // left edge of the hover pill, which glides from button to button
+    static CLK: RefCell<(String, u64)> = const { RefCell::new((String::new(), 0)) }; // the time shown and when it changed
     static FHOT: Cell<i32> = const { Cell::new(-1) };
     static HOT: Cell<i32> = const { Cell::new(NONE) };
     static ORDER: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) }; // unpinned windows in the order their buttons were added
@@ -460,6 +466,18 @@ unsafe fn tip_font() -> HFONT {
 }
 
 unsafe extern "system" fn tip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_TIMER {
+        let (t0, x, y) = TIP_ANIM.get();
+        let t = (now_ms().saturating_sub(t0) as f32 / 160.0).min(1.0);
+        let p = 1.0 - (1.0 - t).powi(3);
+        SetLayeredWindowAttributes(hwnd, 0, (p * 255.0) as u8, LWA_ALPHA);
+        let d = ((1.0 - p) * sc(7) as f32) as i32;
+        SetWindowPos(hwnd, null_mut(), x, if at_top() { y - d } else { y + d }, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        if t >= 1.0 {
+            KillTimer(hwnd, 1);
+        }
+        return 0;
+    }
     if msg != WM_PAINT {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
@@ -486,7 +504,7 @@ unsafe fn tip_text(h: i32) -> String {
         SEARCH => "Search".into(),
         TASKVIEW => t!("Представление задач", "Task View", ja: "タスク ビュー", pt: "Visão de Tarefas").into(),
         0 => "Start".into(),
-        TAPP => "Hidden icons".into(),
+        TAPP => t!("Фоновые приложения", "Background apps", ja: "バックグラウンド アプリ", pt: "Apps em segundo plano", zh: "后台应用").into(),
         GEAR => t!("Стиль", "Style", ja: "スタイル", pt: "Estilo", zh: "样式").into(),
         SHOWDESK => t!("Показать рабочий стол", "Show desktop", ja: "デスクトップを表示", pt: "Mostrar a área de trabalho", zh: "显示桌面").into(),
         CLOCK => {
@@ -551,14 +569,25 @@ unsafe fn show_tip(s: String, cx: i32) {
     let (w, h) = (r.right + sc(16), r.bottom + sc(10));
     TIP.set(s);
     round_window(tw, w, h, 8);
+    let seen = IsWindowVisible(tw) != 0;
+    if !seen {
+        SetLayeredWindowAttributes(tw, 0, if line_icons() { 0 } else { 255 }, LWA_ALPHA);
+    }
+    let start = |x: i32, y: i32| if !seen && line_icons() {
+        TIP_ANIM.set((now_ms(), x, y));
+        SetTimer(tw, 1, FRAME, None);
+    };
     if vert() {
         let y = (cx - h / 2).clamp(sc(4), GetSystemMetrics(SM_CYSCREEN) - h - sc(4));
         SetWindowPos(tw, HWND_TOPMOST, side_x(w), y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        start(side_x(w), y);
         InvalidateRect(tw, null(), 1);
         return;
     }
     let x = (cx - w / 2).clamp(sc(4), GetSystemMetrics(SM_CXSCREEN) - w - sc(4));
-    SetWindowPos(tw, HWND_TOPMOST, x, if at_top() { bar_h() - bar_off() + sc(6) } else { bar_top() + bar_off() - h - sc(6) }, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    let y = if at_top() { bar_h() - bar_off() + sc(6) } else { bar_top() + bar_off() - h - sc(6) };
+    SetWindowPos(tw, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    start(x, y);
     InvalidateRect(tw, null(), 1);
 }
 
@@ -613,7 +642,8 @@ unsafe fn sw_layout(sw: HWND) {
     let (w, h) = (tw + 2 * pad, th + 2 * pad);
     SW_CARDS.with_borrow_mut(|(_, ids)| thumbs::unregister(sw, ids));
     round_window(sw, w, h, 18);
-    SetWindowPos(sw, HWND_TOPMOST, mon.left + (scr - w) / 2, mon.top + (sch - h) / 2, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    let at = (mon.left + (scr - w) / 2, mon.top + (sch - h) / 2);
+    thumbs::slide_to(sw, if IsWindowVisible(sw) != 0 { at } else { (at.0, at.1 + sc(22)) }, at, w, h);
     let ids = thumbs::register(sw, &wins, &rects);
     SW_CARDS.set((rects, ids));
 }
@@ -685,6 +715,8 @@ unsafe extern "system" fn sw_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
         }
         WM_MOUSEWHEEL => alt_tab((wp >> 16) as i16 > 0),
+        WM_TIMER if wp == 2 => thumbs::slide_step(hwnd),
+        WM_TIMER if wp == 3 => _ = InvalidateRect(hwnd, null(), 0),
         _ => return DefWindowProcW(hwnd, msg, wp, lp),
     }
     0
@@ -692,6 +724,7 @@ unsafe extern "system" fn sw_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
 unsafe fn hide_tip(bar: HWND) {
     KillTimer(bar, 2);
+    KillTimer(TIPWND.get(), 1);
     ShowWindow(TIPWND.get(), SW_HIDE);
 }
 
@@ -1405,6 +1438,7 @@ fn refresh_status() {
             t.retain(|x| {
                 let alive = IsWindow(x.hwnd) != 0;
                 if !alive {
+                    forget_icon(x.icon);
                     DestroyIcon(x.icon);
                 }
                 alive
@@ -1584,6 +1618,10 @@ unsafe fn appear(key: isize) -> f32 {
         return 1.0;
     }
     BUSY.set(true);
+    if line_icons() {
+        let u = t - 1.0;
+        return 1.0 + 2.7 * u * u * u + 1.7 * u * u; // a little overshoot
+    }
     ease(t)
 }
 
@@ -2139,14 +2177,45 @@ unsafe fn paint(hwnd: HWND) {
     SelectObject(dc, f_glyph);
     sym_t(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(GEAR, hot == GEAR), press_t(GEAR));
 
+    // Delphos: one highlight that glides to the button under the pointer, and icons that swell around the pointer like a dock's
+    let spot = match hot {
+        SEARCH => Some(0),
+        TASKVIEW => Some(1),
+        h if h >= 0 => Some(h + LEAD),
+        _ => None,
+    };
+    let near = hv(4000, spot.is_some() && line_icons());
+    let now = now_ms();
+    let follow = |c: &Cell<(f32, u64)>, want: f32, ms: f32| {
+        let (at, t) = c.get();
+        let dt = now.saturating_sub(t).min(50) as f32;
+        let mut v = if near < 0.05 { want } else { at + (want - at) * (1.0 - (-dt / ms).exp()) };
+        if (want - v).abs() < 0.5 { v = want } else { BUSY.set(true) }
+        c.set((v, now));
+        v
+    };
+    let mag_x = MAG_X.with(|c| follow(c, MOUSE_X.get(), 40.0));
+    let mag = |cx: f32| near * (-((cx - mag_x) / (l.bw as f32 * 1.05)).powi(2)).exp();
+    if line_icons() {
+        let want = spot.map_or(PILL.get().0, |s| (l.x0 + s * (l.bw + l.gap)) as f32);
+        let x = PILL.with(|c| follow(c, want, 45.0)) as i32;
+        if near > 0.01 {
+            fill(dc, cell(x, l.bw), mix(pal().bg, pal().hover, near), sc(10));
+        }
+    }
+
     // search button (left of Start)
     let sb = RECT { left: l.x0, top, right: l.x0 + l.bw, bottom: bot };
-    glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, sc(8));
+    if !line_icons() {
+        glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, sc(8));
+    }
     SelectObject(dc, f_glyph);
-    sym_t(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(SEARCH, hot == SEARCH), press_t(SEARCH));
+    sym_t(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, 2.0 * mag((sb.left + sb.right) as f32 / 2.0), press_t(SEARCH));
     let tb = RECT { left: l.x0 + l.bw + l.gap, top, right: l.x0 + 2 * l.bw + l.gap, bottom: bot };
-    glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, sc(8));
-    sym_t(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { mix(pal().dim, pal().text, 0.5) }, hv(TASKVIEW, hot == TASKVIEW), press_t(TASKVIEW));
+    if !line_icons() {
+        glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, sc(8));
+    }
+    sym_t(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { mix(pal().dim, pal().text, 0.5) }, 2.0 * mag((tb.left + tb.right) as f32 / 2.0), press_t(TASKVIEW));
 
     // Start, pinned apps, open windows (center)
     BTNS.with_borrow(|btns| {
@@ -2156,14 +2225,19 @@ unsafe fn paint(hwnd: HWND) {
             let act = b.wins.contains(&fg);
             let att = !act && FLASH.with_borrow(|f| b.wins.iter().any(|w| f.contains(w))); // flashing: lit until it is activated
             let (th, ta, tp) = (hv(i as i32, hot == i as i32), hv(2000 + i as i32, act), press_t(i as i32));
-            if th > 0.01 || ta > 0.01 || tp > 0.0 {
+            let m = mag(x as f32 + l.bw as f32 / 2.0);
+            if line_icons() {
+                if ta > 0.01 || tp > 0.0 {
+                    fill(dc, r, mix(mix(mix(pal().bg, pal().hover, m.min(1.0)), active_bg, ta), pal().accent, 0.25 * tp), sc(10));
+                }
+            } else if th > 0.01 || ta > 0.01 || tp > 0.0 {
                 fill(dc, r, mix(mix(mix(pal().bg, pal().hover, th), active_bg, ta), pal().accent, 0.5 * tp), sc(8));
             }
             if att {
                 fill(dc, r, mix(pal().bg, pal().accent, 0.4), sc(8));
             }
             if i == 0 && line_icons() {
-                win_logo(dc, r, icon_px() * 19 / 24, th, tp);
+                win_logo(dc, r, icon_px() * 19 / 24, 1.8 * m, tp);
                 continue;
             }
             if i == 0 {
@@ -2185,10 +2259,10 @@ unsafe fn paint(hwnd: HWND) {
             let key = b.pin.map(|p| -(p as isize) - 1).or_else(|| b.wins.first().map(|&w| w as isize)).unwrap_or(0);
             // squeezes on click, grows in when new, lifts a pixel on hover
             let isz = (icon_px().min(l.bw - sc(6)) as f32 * (1.0 - 0.18 * tp) * (0.55 + 0.45 * appear(key))) as i32;
-            let lift = if line_icons() { sc(2) as f32 * th + b.pin.map_or(0.0, |p| launch_hop(p, !b.wins.is_empty())) } else { sc(1) as f32 * th };
+            let lift = if line_icons() { sc(3) as f32 * m + b.pin.map_or(0.0, |p| launch_hop(p, !b.wins.is_empty())) } else { sc(1) as f32 * th };
             if !ic.is_null() {
                 if glassy.is_some() {
-                    let k = icon_px().min(l.bw - sc(6)) as f32 * (1.0 + 0.1 * th) * (1.0 - 0.18 * tp) * (0.55 + 0.45 * appear(key));
+                    let k = icon_px().min(l.bw - sc(6)) as f32 * (1.0 + 0.24 * m) * (1.0 - 0.18 * tp) * (0.55 + 0.45 * appear(key));
                     icons.push((ic, x as f32 + l.bw as f32 / 2.0, (mid - sc(2)) as f32 - lift, k)); // after the glass: it would take an icon's dark parts for a thin layer
                 } else {
                     DrawIconEx(dc, x + (l.bw - isz) / 2, mid - isz / 2 - sc(2) - lift as i32, ic, isz, isz, 0, null_mut(), DI_NORMAL);
@@ -2214,7 +2288,7 @@ unsafe fn paint(hwnd: HWND) {
     // tray apps
     glow(dc, TAPP, hot == TAPP, cell(l.apps.0, tcell()), pal().bg, pal().hover, sc(8));
     SelectObject(dc, f_glyph);
-    let open_tf = IsWindowVisible(TRAYFLY.get()) != 0;
+    let open_tf = IsWindowVisible(TRAYFLY.get()) != 0 || fly::is_open(fly::Kind::Tray);
     let turn = ease(hv(TF_KEY, open_tf)); // the chevron turns over as the flyout opens, and back
     let cc = cell(l.apps.0, tcell());
     chevron(dc, (cc.left + cc.right) / 2, mid, sc(if line_icons() { 4 } else { 5 }), if at_top() { 180.0 } else { 0.0 } + 180.0 * turn, mix(icon_ink(), pal().accent, turn));
@@ -2290,7 +2364,20 @@ unsafe fn paint(hwnd: HWND) {
         let mut sz: SIZE = zeroed();
         GetTextExtentPoint32W(dc, wtm.as_ptr(), wtm.len() as i32 - 1, &mut sz);
         let tx = cb.right - sc(10) - sz.cx;
-        text(dc, &tm, RECT { left: tx, right: cb.right, ..cb }, pal().text, DT_LEFT);
+        // a new minute rises into place
+        let age = CLK.with_borrow_mut(|c| {
+            if c.0 != tm {
+                c.1 = if c.0.is_empty() { 0 } else { now };
+                c.0 = tm.clone();
+            }
+            now.saturating_sub(c.1)
+        });
+        let e = 1.0 - (1.0 - (age as f32 / 420.0).min(1.0)).powi(3);
+        if e < 1.0 {
+            BUSY.set(true);
+        }
+        let d = ((1.0 - e) * sc(9) as f32) as i32;
+        text(dc, &tm, RECT { left: tx, right: cb.right, top: cb.top + d, bottom: cb.bottom + d }, mix(pal().bg, pal().text, e), DT_LEFT);
         SelectObject(dc, f_small);
         text(dc, &dt, RECT { left: cb.left + sc(8), right: tx - sc(8), ..cb }, pal().dim, DT_RIGHT);
         break 'horiz;
@@ -2913,7 +3000,9 @@ unsafe fn click(h: i32, left: bool, mid: bool) {
         TAPP..=-900 => {
             let slot = (h - TAPP) as usize;
             if slot == 0 {
-                if left {
+                if left && line_icons() {
+                    fly::toggle_click(fly::Kind::Tray);
+                } else if left {
                     fly_toggle();
                 }
             } else if mid {
@@ -3123,6 +3212,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let h = hit(hwnd, (lp & 0xffff) as i16 as i32, (lp >> 16) as i16 as i32);
             let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
             TrackMouseEvent(&mut tme);
+            MOUSE_X.set(if vert() { (lp >> 16) as i16 as f32 } else { (lp & 0xffff) as i16 as f32 });
+            if line_icons() && (h >= 0 || h == SEARCH || h == TASKVIEW) {
+                InvalidateRect(hwnd, null(), 0); // the magnifier follows
+            }
             if HOT.replace(h) != h {
                 hide_tip(hwnd);
                 if h != NONE {
@@ -3155,6 +3248,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if h != NONE {
                 press(h);
             }
+            // a tray icon acts when the button comes up, like in Explorer: a menu opened on the way down would be dismissed by the release
+            TRAY_DOWN.set(if (TAPP + 1..=-900).contains(&h) && msg != WM_MBUTTONDOWN { h } else { NONE });
+            if TRAY_DOWN.get() != NONE {
+                InvalidateRect(hwnd, null(), 0);
+                return 0;
+            }
             if h == NONE && msg == WM_RBUTTONDOWN {
                 fly::context_menu(x); // right click on an empty spot
             } else if h >= 1 && msg == WM_RBUTTONDOWN {
@@ -3163,6 +3262,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 click(h, msg == WM_LBUTTONDOWN, msg == WM_MBUTTONDOWN);
             }
             InvalidateRect(hwnd, null(), 0);
+        }
+        WM_LBUTTONUP | WM_RBUTTONUP => {
+            let h = hit(hwnd, (lp & 0xffff) as i16 as i32, (lp >> 16) as i16 as i32);
+            if TRAY_DOWN.replace(NONE) == h && h != NONE {
+                click(h, msg == WM_LBUTTONUP, false);
+            }
         }
         CALLBACK => {
             if wp == ABN_FULLSCREENAPP as usize {
@@ -3237,7 +3342,7 @@ fn main() {
             screenshot();
             return;
         }
-        // `topbar --preview quick|wifi|cal|menu|bar`: one flyout (or the bar, painted only) on its own (no bar, no hooks), to look at a style change; the process is closed by hand
+        // `topbar --preview quick|wifi|cal|menu|tray|bar`: one flyout (or the bar, painted only) on its own (no bar, no hooks), to look at a style change; the process is closed by hand
         if let Some(p) = std::env::args().skip_while(|a| a != "--preview").nth(1) {
             SetProcessDPIAware();
             let (mut tok, mut inp): (usize, GdiplusStartupInput) = (0, zeroed());
@@ -3260,6 +3365,33 @@ fn main() {
                 "wifi" => fly::toggle(fly::Kind::Wifi),
                 "cal" => fly::toggle(fly::Kind::Cal),
                 "menu" => style_menu(),
+                "tray" => {
+                    // no tray host here: the open windows stand in for tray icons; TOPBAR_TRAYTEST=hwnd,uid,message adds a real one
+                    let mut wins: Vec<HWND> = vec![];
+                    EnumWindows(Some(collect), &mut wins as *mut _ as LPARAM);
+                    let icon = |w: HWND| {
+                        let ic = CopyIcon(win_icon(w));
+                        remember_icon(ic);
+                        ic
+                    };
+                    for w in wins {
+                        let mut b = [0u16; 128];
+                        let n = GetWindowTextW(w, b.as_mut_ptr(), 128).max(0) as usize;
+                        let exe = exe_of(w);
+                        let t = TIcon { hwnd: w, uid: 0, guid: [0; 16], icon: icon(w), cb: 0, ver: 0, hidden: false, tip: String::from_utf16_lossy(&b[..n]), key: exe.rsplit('\\').next().unwrap_or("").into() };
+                        TAPPS.with_borrow_mut(|v| v.push(t));
+                    }
+                    if let Ok(s) = std::env::var("TOPBAR_TRAYTEST") {
+                        let v: Vec<u64> = s.split(',').filter_map(|x| x.parse().ok()).collect();
+                        if let [h, uid, cb] = v[..] {
+                            let w = h as isize as HWND;
+                            let t = TIcon { hwnd: w, uid: uid as u32, guid: [0; 16], icon: icon(w), cb: cb as u32, ver: 0, hidden: false, tip: "Teste".into(), key: "teste.exe".into() };
+                            TAPPS.with_borrow_mut(|v| v.insert(0, t));
+                            fly::PREVIEW.store(false, Relaxed); // closes on losing the focus, like the real one
+                        }
+                    }
+                    fly::toggle(fly::Kind::Tray);
+                }
                 _ => fly::toggle(fly::Kind::Quick),
             }
             let mut msg: MSG = zeroed();
@@ -3326,7 +3458,7 @@ fn main() {
         TRAYFLY.set(CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, fc.as_ptr(), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), hi, null()));
         let tipc = wide("topbar_tip");
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(tip_proc), hInstance: hi, lpszClassName: tipc.as_ptr(), ..zeroed() });
-        TIPWND.set(CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, tipc.as_ptr(), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), hi, null()));
+        TIPWND.set(CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED, tipc.as_ptr(), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), hi, null()));
         let swc = wide("topbar_alttab");
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(sw_proc), hInstance: hi, lpszClassName: swc.as_ptr(), ..zeroed() });
         SWWND.set(CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, swc.as_ptr(), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), hi, null()));

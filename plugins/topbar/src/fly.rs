@@ -14,6 +14,7 @@ pub enum Kind {
     Cal,
     Start,
     Menu, // right-click menu of the bar
+    Tray, // apps in the background (Delphos style; the others have the icon grid)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -29,6 +30,9 @@ enum Act {
     Ctx(u8), // an item of the Wi-Fi panel's right-click menu
     Settings(&'static str),
     Menu(u8),
+    Tray(usize),    // index into tray_list()
+    TrayPin(usize), // keep on the bar, or not
+    TrayEnd(usize), // end the app (two clicks)
     CalPrev,
     CalNext,
     CalToday,
@@ -97,6 +101,8 @@ thread_local! {
     static FLY: Cell<Option<Kind>> = const { Cell::new(None) };
     static FH: Cell<HWND> = const { Cell::new(null_mut()) };
     static DEACT: Cell<(Option<Kind>, u64)> = const { Cell::new((None, 0)) }; // panel closed by losing focus, and when
+    static TMENU: Cell<(u32, u64)> = const { Cell::new((0, 0)) }; // the app whose tray menu was asked for, and when: the panel stays under it
+    static ICO: RefCell<Vec<(HICON, f32, f32, f32)>> = const { RefCell::new(Vec::new()) }; // app icons of this frame: drawn over the finished glass
     static BACKDROP: RefCell<Option<crate::glass::Backdrop>> = const { RefCell::new(None) }; // what is behind the open panel
     static ALPHA: Cell<u8> = const { Cell::new(255) }; // its opacity now (opening fade)
     static CAL_TURN: Cell<(i32, u64)> = const { Cell::new((0, 0)) }; // the month turned last: which way and when
@@ -632,6 +638,7 @@ fn size(k: Kind) -> (i32, i32) {
         Kind::Wifi => (360, wifi_rows().2),
         Kind::Start => (560, 640),
         Kind::Menu => (MW, menu_rows().1),
+        Kind::Tray => (TW, 54 + TROW * (tray_list().len().clamp(1, TROWS) as i32) + 10),
     }
 }
 
@@ -738,6 +745,17 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
             v.push((r(w - 58, 18, w - 16, 42), Act::WifiSwitch));
             v.push((r(12, h - 44, w - 12, h - 8), Act::Settings("ms-settings:network-wifi")));
             v.extend(ctx_rects()); // last: on top of the rows
+            v
+        }
+        Kind::Tray => {
+            let (n, s) = (tray_list().len(), SCROLL.get());
+            let mut v = vec![];
+            for i in 0..TROWS.min(n.saturating_sub(s)) {
+                let t = 54 + TROW * i as i32;
+                v.push((r(8, t, w - 8, t + TROW - 2), Act::Tray(s + i)));
+                v.push((r(w - 84, t + 9, w - 54, t + 39), Act::TrayPin(s + i)));
+                v.push((r(w - 50, t + 9, w - 20, t + 39), Act::TrayEnd(s + i)));
+            }
             v
         }
         Kind::Menu => {
@@ -893,6 +911,7 @@ pub fn close() {
         return;
     }
     unsafe {
+        InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns back
         kill_ghost();
         GHOST.set((h, now_ms(), FIN.get()));
         KillTimer(h, 1);
@@ -974,7 +993,8 @@ pub fn toggle(k: Kind) {
     close();
     unsafe {
         HV.with_borrow_mut(|m| m.retain(|k, _| *k < 1_000_000)); // flyout keys are >= 1_000_000: no stale glow from the last panel
-        GLIDE.with_borrow_mut(|m| m.clear());
+        GLIDE.with_borrow_mut(|m| m.retain(|k, _| *k < 1_000_000));
+        TMENU.set((0, 0));
         CAL_TURN.set((0, 0));
         CTX.set(None);
         QUERY.set(String::new());
@@ -1012,6 +1032,10 @@ pub fn toggle(k: Kind) {
         let x = if vert() { side_x(w) } else { match k {
             Kind::Start => (sw - w) / 2,
             Kind::Menu => MENU_X.get().min(sw - w - sc(8)).max(sc(8)),
+            Kind::Tray => {
+                let (bx, bw) = bar_x_w();
+                (bx + layout(bw).apps.0 + tcell() / 2 - w / 2).min(sw - w - sc(8)).max(sc(8)) // above the chevron
+            }
             _ => sw - w - sc(8),
         } };
         let class = wide("topbar_fly");
@@ -1177,6 +1201,35 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
             }
             _ => crate::quick::set_energy_saver(!crate::quick::energy_saver()),
         },
+        Act::Tray(_) => {} // acts when the button comes up
+        Act::TrayPin(i) => {
+            if let Some((_, _, _, key, _)) = tray_item(i) {
+                toggle_shown(&key);
+                InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
+            }
+        }
+        Act::TrayEnd(i) => {
+            let Some((t, _, _, key, _)) = tray_item(i) else { return };
+            if key == "explorer.exe" || PREVIEW.load(Relaxed) {
+                return;
+            }
+            if CONFIRM.get() != 100 + i as i32 {
+                CONFIRM.set(100 + i as i32); // first click only arms it
+                return;
+            }
+            CONFIRM.set(-1);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(t.0, &mut pid);
+            let p = OpenProcess(1, 0, pid); // PROCESS_TERMINATE
+            if !p.is_null() {
+                if TerminateProcess(p, 0) != 0 {
+                    TAPPS.with_borrow_mut(|v| v.retain(|x| x.hwnd != t.0 || { forget_icon(x.icon); DestroyIcon(x.icon); false }));
+                }
+                CloseHandle(p);
+            }
+            SCROLL.set(SCROLL.get().min(tray_list().len().saturating_sub(TROWS)));
+            InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
+        }
         Act::Mute => toggle_mute(),
         Act::Menu(i) => {
             close();
@@ -1304,6 +1357,75 @@ unsafe fn track(dc: HDC, rc: RECT, frac: f32) {
     fill(dc, RECT { left: x - kr, top: m - kr, right: x + kr, bottom: m + kr }, if style().light() { rgb(255, 255, 255) } else { mix(pal().text, card(), 0.04) }, 2 * kr);
 }
 
+const TW: i32 = 320; // background apps: panel width, row height, rows shown at once
+const TROW: i32 = 50;
+const TROWS: usize = 8;
+
+/// The tray icon behind row `i`: window, id, message, version; its exe, what it says, its key.
+unsafe fn tray_item(i: usize) -> Option<((HWND, u32, u32, u32), String, String, String, HICON)> {
+    let k = *tray_list().get(i)?;
+    let (t, tip, key, ic) = TAPPS.with_borrow(|t| t.get(k).map(|x| ((x.hwnd, x.uid, x.cb, x.ver), x.tip.clone(), x.key.clone(), x.icon)))?;
+    Some((t, exe_of(t.0), tip, key, ic))
+}
+
+/// A click on a background app: left opens it, right brings up its own menu over the panel.
+unsafe fn tray_do(i: usize, left: bool) {
+    let Some((t, ..)) = tray_item(i) else { return };
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(t.0, &mut pid);
+    TMENU.set(if left { (0, 0) } else { (pid, now_ms()) });
+    tray_click(t, left);
+    if left {
+        close();
+    }
+}
+
+/// The app's menu is up (timer 7, after the panel lost the focus to it): the panel stays until the menu is gone.
+unsafe fn tray_watch(hw: HWND) {
+    let (pid, t0) = TMENU.get();
+    let fg = GetForegroundWindow();
+    let mut fp = 0u32;
+    let tid = GetWindowThreadProcessId(fg, &mut fp);
+    const STAY: u32 = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+    if fg == hw {
+        KillTimer(hw, 7);
+        TMENU.set((0, 0));
+        SetWindowPos(hw, HWND_TOPMOST, 0, 0, 0, 0, STAY);
+        return;
+    }
+    let mut gi: GUITHREADINFO = zeroed();
+    gi.cbSize = size_of::<GUITHREADINFO>() as u32;
+    let menu = GetGUIThreadInfo(tid, &mut gi) != 0 && gi.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE) != 0;
+    // menus some apps draw themselves: a small window without a caption
+    let own = fp == pid && IsWindowVisible(fg) != 0 && GetWindowLongW(fg, GWL_STYLE) as u32 & WS_CAPTION != WS_CAPTION && IsZoomed(fg) == 0;
+    if own {
+        SetWindowPos(hw, fg, 0, 0, 0, 0, STAY); // right under it
+    }
+    if menu || own || now_ms().saturating_sub(t0) < 700 {
+        return;
+    }
+    KillTimer(hw, 7);
+    TMENU.set((0, 0));
+    let (mut pt, mut wr): (POINT, RECT) = (zeroed(), zeroed());
+    GetCursorPos(&mut pt);
+    GetWindowRect(hw, &mut wr);
+    if fp == pid && IsWindowVisible(fg) == 0 && PtInRect(&wr, pt) != 0 {
+        SetWindowPos(hw, HWND_TOPMOST, 0, 0, 0, 0, STAY); // the menu was dismissed over the panel: back to it
+        force_fg(hw);
+    } else {
+        close();
+    }
+}
+
+/// An app icon of a panel.
+unsafe fn fly_icon(dc: HDC, ic: HICON, cx: f32, cy: f32, size: f32) {
+    if line_icons() {
+        ICO.with_borrow_mut(|v| v.push((ic, cx, cy, size)));
+    } else {
+        app_icon(dc, ic, cx, cy, size);
+    }
+}
+
 const TILE_KEY: i32 = 1_600_000; // animation keys of the Delphos quick panel
 
 /// Opening progress 0..1 of the `n`-th part of a panel: each starts 28 ms after the previous one. 1 in the other styles.
@@ -1358,6 +1480,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
     let mut cr: RECT = zeroed();
     GetClientRect(hw, &mut cr);
     BUSY.set(false);
+    ICO.with_borrow_mut(|v| v.clear());
     let glassy = if line_icons() { crate::glass::Dib::new(cr.right, cr.bottom) } else { None };
     let (dc, bmp) = match glassy {
         Some(d) => (d.dc, null_mut()),
@@ -1818,6 +1941,68 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 }
             }
         }
+        Kind::Tray => {
+            let t = rise(0);
+            SelectObject(dc, f_title);
+            text(dc, t!("В фоне", "In the background", ja: "バックグラウンド", pt: "Em segundo plano", zh: "后台运行"), drop_by(r(20, 12, w - 60, 46), t), mix(pal().bg, pal().text, t), DT_LEFT);
+            let list = tray_list();
+            SelectObject(dc, f_small);
+            if !list.is_empty() {
+                text(dc, &list.len().to_string(), drop_by(r(w - 60, 12, w - 22, 46), t), mix(pal().bg, pal().dim, t), DT_RIGHT);
+            } else {
+                text(dc, t!("Здесь пока пусто", "Nothing here yet", ja: "まだ何もありません", pt: "Nada rodando em segundo plano", zh: "这里还什么都没有"), r(20, 54, w - 20, 54 + TROW), pal().dim, DT_LEFT);
+            }
+            let kept = bar_idx();
+            for (rc, a) in rects(k) {
+                let Act::Tray(i) = a else { continue };
+                let Some((_, exe, tip, key, ic)) = tray_item(i) else { continue };
+                let row = (i - SCROLL.get()) as i32;
+                let t = rise(1 + row);
+                let seen = |c: u32| mix(pal().bg, c, t);
+                let d = ((1.0 - t) * sc(14) as f32) as i32;
+                let rc = RECT { top: rc.top + d, bottom: rc.bottom + d, ..rc };
+                let on = hot(a) || hot(Act::TrayPin(i)) || hot(Act::TrayEnd(i));
+                let pinned = list.get(i).is_some_and(|x| kept.contains(x));
+                let key_h = 1_720_000 + row * 10;
+                let (th, p) = (hv(key_h, on), press_t(key_h));
+                let base = mix(pal().bg, pal().text, 0.08 * th + 0.06 * p);
+                fill(dc, inset(rc, (p * sc(2) as f32) as i32), seen(base), sc(20));
+                let cy = (rc.top + rc.bottom) / 2;
+                if !ic.is_null() {
+                    // pops in, swells under the pointer
+                    let size = sc(22) as f32 * (0.5 + 0.5 * t) * (1.0 + 0.16 * th) * (1.0 - 0.14 * p);
+                    fly_icon(dc, ic, (rc.left + sc(26)) as f32, cy as f32, size);
+                }
+                let armed = CONFIRM.get() == 100 + i as i32;
+                let name = app_name(&exe);
+                let line = tip.lines().next().unwrap_or("").trim().to_string();
+                let sub = if armed { t!("Нажмите ещё раз, чтобы завершить", "Click again to end it", ja: "もう一度クリックで終了", pt: "Clique de novo para encerrar", zh: "再次点击以结束").to_string() } else if line.eq_ignore_ascii_case(&name) { String::new() } else { line };
+                let left = rc.left + sc(50) + (th * sc(2) as f32) as i32;
+                let right = rc.right - if on || pinned { sc(80) } else { sc(14) };
+                SelectObject(dc, f_semi);
+                if sub.is_empty() {
+                    text(dc, &name, RECT { left, right, ..rc }, seen(pal().text), DT_LEFT);
+                } else {
+                    text(dc, &name, RECT { left, right, top: cy - sc(19), bottom: cy + sc(1) }, seen(pal().text), DT_LEFT);
+                    SelectObject(dc, f_small);
+                    text(dc, &sub, RECT { left, right, top: cy, bottom: cy + sc(18) }, seen(if armed { BAD } else { pal().dim }), DT_LEFT);
+                }
+                // the row's buttons: pin (stays lit while the icon is on the bar), end
+                SelectObject(dc, f_glyph);
+                for (act, glyph, shown) in [(Act::TrayPin(i), "\u{E718}", th.max(if pinned { 1.0 } else { 0.0 })), (Act::TrayEnd(i), "\u{E711}", if key == "explorer.exe" { 0.0 } else { th })] {
+                    let Some(&(b, _)) = rects(k).iter().find(|(_, x)| *x == act) else { continue };
+                    let b = RECT { top: b.top + d, bottom: b.bottom + d, ..b };
+                    let hb = hv(key_h + if glyph == "\u{E718}" { 1 } else { 2 }, hot(act));
+                    if shown * hb > 0.01 {
+                        fill(dc, b, seen(mix(base, if glyph == "\u{E711}" { BAD } else { pal().text }, 0.16 * hb * shown)), sc(30));
+                    }
+                    let c = if glyph == "\u{E711}" { mix(pal().dim, BAD, hb) } else if pinned { pal().accent } else { mix(pal().dim, pal().text, hb) };
+                    if shown > 0.01 {
+                        sym_t(dc, glyph, b, seen(mix(base, c, shown)), hb, 0.0);
+                    }
+                }
+            }
+        }
         Kind::Menu => {
             // header: the app's icon on an accent-tinted tile, its name, and what is open
             MHEAD.with_borrow(|hd| {
@@ -1825,7 +2010,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     let tile = r(14, 12, 48, 46);
                     fill(dc, tile, mix(pal().bg, pal().accent, 0.16), sc(10));
                     if !ic.is_null() {
-                        app_icon(dc, *ic, (tile.left + tile.right) as f32 / 2.0, (tile.top + tile.bottom) as f32 / 2.0, sc(24) as f32);
+                        fly_icon(dc, *ic, (tile.left + tile.right) as f32 / 2.0, (tile.top + tile.bottom) as f32 / 2.0, sc(24) as f32);
                     } else {
                         SelectObject(dc, f_glyph); // no app icon (Style, Language): the menu's own symbol
                         sym(dc, glyph, tile, pal().accent);
@@ -1859,9 +2044,9 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     let col = if it.danger { BAD } else { pal().text };
                     glow(dc, 1_700_000 + i as i32, hot(*a), *rc, pal().bg, if it.danger { mix(pal().bg, BAD, 0.22) } else { pal().hover }, sc(8));
                     // plain text rows: a window's own icon is the only picture; the current choice gets an accent dot
-                    let mut lx = rc.left + sc(14);
+                    let mut lx = rc.left + sc(14) + if line_icons() { (hv(1_700_000 + i as i32, hot(*a)) * sc(4) as f32) as i32 } else { 0 }; // steps aside for the pointer
                     if !it.icon.is_null() {
-                        app_icon(dc, it.icon, (lx + sc(8)) as f32, (rc.top + rc.bottom) as f32 / 2.0, sc(16) as f32);
+                        fly_icon(dc, it.icon, (lx + sc(8)) as f32, (rc.top + rc.bottom) as f32 / 2.0, sc(16) as f32);
                         lx += sc(26);
                     }
                     if it.swatch != u32::MAX {
@@ -1943,7 +2128,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                             })
                         });
                         if !ic.is_null() {
-                            app_icon(dc, ic, (rc.left + sc(13) + sc(24) / 2) as f32, (rc.top + rc.bottom) as f32 / 2.0, sc(24) as f32); // smooth, or at its loaded size
+                            fly_icon(dc, ic, (rc.left + sc(13) + sc(24) / 2) as f32, (rc.top + rc.bottom) as f32 / 2.0, sc(24) as f32); // smooth, or at its loaded size
                         }
                         let store = wstr(&app.1).starts_with("shell:");
                         text(dc, &app.0, RECT { left: rc.left + sc(52), top: rc.top, right: rc.right - sc(110), bottom: rc.bottom }, pal().text, DT_LEFT);
@@ -1977,8 +2162,15 @@ unsafe fn paint(hw: HWND, k: Kind) {
         let mut wr: RECT = zeroed();
         GetWindowRect(hw, &mut wr);
         BACKDROP.with_borrow(|b| crate::glass::compose(d, b.as_ref(), wr.left, wr.top, crate::glass::Slab { r: cr, rad: sc(16) as f32 }));
+        for (ic, x, y, k) in ICO.take() {
+            app_icon(d.dc, ic, x, y, k);
+            d.solid(RECT { left: (x - k / 2.0) as i32 - 1, top: (y - k / 2.0) as i32 - 1, right: (x + k / 2.0) as i32 + 2, bottom: (y + k / 2.0) as i32 + 2 });
+        }
         crate::glass::present(hw, d, ALPHA.get());
     } else {
+        for (ic, x, y, k) in ICO.take() {
+            app_icon(dc, ic, x, y, k);
+        }
         BitBlt(wdc, 0, 0, cr.right, cr.bottom, dc, 0, 0, SRCCOPY);
     }
     SelectObject(dc, of);
@@ -2018,7 +2210,9 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
         WM_ACTIVATE if wp & 0xffff == 0 && !PREVIEW.load(Relaxed) => {
             // A file drag that began elsewhere (desktop icon, folder window) deactivates this panel with the button still
             // down: keep Start open so the drop can land on it, and close once the button is up (timer 6).
-            if k == Kind::Start && GetAsyncKeyState(VK_LBUTTON as i32) < 0 {
+            if k == Kind::Tray && TMENU.get().0 != 0 {
+                SetTimer(hw, 7, 100, None); // its app's menu takes the focus: wait for it to go
+            } else if k == Kind::Start && GetAsyncKeyState(VK_LBUTTON as i32) < 0 {
                 SetTimer(hw, 6, 150, None);
             } else {
                 DEACT.set((Some(k), now_ms()));
@@ -2034,6 +2228,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             }
         }
         WM_DROPFILES => on_files(hw, wp as HDROP),
+        WM_TIMER if wp == 7 => tray_watch(hw),
         WM_TIMER if wp == 9 => {
             KillTimer(hw, 9);
             if k == Kind::Quick {
@@ -2045,8 +2240,10 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             InvalidateRect(hw, null(), 0);
         }
         WM_TIMER => {
-            if k == Kind::Wifi && PASS.with_borrow(|p| p.is_none()) {
-                read_nets();
+            if k == Kind::Tray || k == Kind::Wifi && PASS.with_borrow(|p| p.is_none()) {
+                if k == Kind::Wifi {
+                    read_nets();
+                }
                 let (w, h) = (sc(size(k).0), sc(size(k).1));
                 // the panel hangs above the bar: keep its bottom edge where it is and grow / shrink upward
                 let (x, _) = FIN.get();
@@ -2067,6 +2264,9 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 }
             }
             let o = act_at(k, x, y).map(|a| a.1);
+            if k == Kind::Tray && !matches!(o, Some(Act::TrayEnd(_))) {
+                CONFIRM.set(-1);
+            }
             if OVER.replace(o) != o || DRAG.get() != 0 {
                 InvalidateRect(hw, null(), 0);
             }
@@ -2076,6 +2276,9 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             if CTX.with_borrow(|c| c.is_some()) && !matches!(hit, Some((_, Act::Ctx(_)))) {
                 CTX.set(None); // a click beside the open menu only closes it
             } else if let Some((rc, a)) = hit {
+                if let Act::Tray(i) = a {
+                    press(1_720_000 + (i - SCROLL.get()) as i32 * 10);
+                }
                 if let Act::Tile(i) = a {
                     press(TILE_KEY + i as i32);
                 }
@@ -2088,6 +2291,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_RBUTTONUP => {
             match (k, act_at(k, x, y)) {
+                (Kind::Tray, Some((_, Act::Tray(i) | Act::TrayPin(i) | Act::TrayEnd(i)))) => tray_do(i, false),
                 (Kind::Start, Some((_, Act::App(i)))) => app_menu(hw, i, x, y),
                 (Kind::Wifi, Some((_, Act::Net(_) | Act::NetOff))) if PASS.with_borrow(|p| p.is_none()) => {
                     let i = if let Some((_, Act::Net(i))) = act_at(k, x, y) { i } else { NETS.with_borrow(|n| n.iter().position(|n| n.connected)).unwrap_or(0) };
@@ -2103,6 +2307,10 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             InvalidateRect(hw, null(), 0);
         }
         WM_LBUTTONUP => {
+            if let (Kind::Tray, Some((_, Act::Tray(i)))) = (k, act_at(k, x, y)) {
+                tray_do(i, true); // on the way up: what the app opens must not be dismissed by the release
+                return 0;
+            }
             let d = DRAG.replace(0);
             if d != 0 {
                 ReleaseCapture();
@@ -2115,6 +2323,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             let up = (wp >> 16) as i16 > 0;
             match k {
                 Kind::Quick => add_volume(if up { 2 } else { -2 }),
+                Kind::Tray => SCROLL.set(if up { SCROLL.get().saturating_sub(1) } else { (SCROLL.get() + 1).min(tray_list().len().saturating_sub(TROWS)) }),
                 Kind::Start => SCROLL.set(if up { SCROLL.get().saturating_sub(2) } else { (SCROLL.get() + 2).min(filtered().len().saturating_sub(ROWS)) }),
                 _ => {}
             }

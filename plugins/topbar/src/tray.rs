@@ -43,7 +43,9 @@ pub(crate) unsafe fn tray_msg(d: &[u8]) {
         let pos = t.iter().position(|x| x.hwnd == h && x.uid == uid && x.guid == guid);
         match (op, pos) {
             (2, Some(i)) => {
-                DestroyIcon(t.remove(i).icon);
+                let ic = t.remove(i).icon;
+                forget_icon(ic);
+                DestroyIcon(ic);
             }
             (4, Some(i)) => t[i].ver = u(808),
             (0 | 1, _) => {
@@ -68,8 +70,10 @@ pub(crate) unsafe fn tray_msg(d: &[u8]) {
                     let ic = CopyIcon(u(28) as i32 as isize as HICON);
                     if !ic.is_null() {
                         if !x.icon.is_null() {
+                            forget_icon(x.icon);
                             DestroyIcon(x.icon);
                         }
+                        remember_icon(ic);
                         x.icon = ic;
                     }
                 }
@@ -159,6 +163,50 @@ pub(crate) fn tray_count() -> usize {
 pub(crate) fn over_idx() -> Vec<usize> {
     let bar = bar_idx();
     TAPPS.with_borrow(|t| (0..t.len()).filter(|i| !t[*i].hidden && !bar.contains(i)).collect())
+}
+
+/// Every tray icon, for the Delphos panel: the ones only it shows, then the ones kept on the bar.
+pub(crate) fn tray_list() -> Vec<usize> {
+    let mut v = over_idx();
+    v.extend(bar_idx());
+    v
+}
+
+thread_local! {
+    static NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// What a person calls the program: the description in its exe, else the file name.
+pub(crate) unsafe fn app_name(exe: &str) -> String {
+    use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+    if let Some(n) = NAMES.with_borrow(|m| m.get(exe).cloned()) {
+        return n;
+    }
+    let file = wide(exe);
+    let size = GetFileVersionInfoSizeW(file.as_ptr(), null_mut());
+    let mut buf = vec![0u8; size as usize];
+    let query = |buf: &[u8], path: &str| -> Option<(*const u16, u32)> {
+        let (mut p, mut n) = (null_mut(), 0u32);
+        (VerQueryValueW(buf.as_ptr() as *const _, wide(path).as_ptr(), &mut p, &mut n) != 0 && !p.is_null() && n > 0).then_some((p as *const u16, n))
+    };
+    let mut name = String::new();
+    if size > 0 && GetFileVersionInfoW(file.as_ptr(), 0, size, buf.as_mut_ptr() as *mut _) != 0 {
+        if let Some((p, n)) = query(&buf, r"\VarFileInfo\Translation") {
+            if n >= 4 {
+                let (lang, page) = (*p, *p.add(1));
+                if let Some((s, n)) = query(&buf, &format!(r"\StringFileInfo\{lang:04x}{page:04x}\FileDescription")) {
+                    let w = std::slice::from_raw_parts(s, n as usize);
+                    name = wstr_of(w).trim().to_string();
+                }
+            }
+        }
+    }
+    if name.is_empty() {
+        let stem = exe.rsplit('\\').next().unwrap_or(exe).trim_end_matches(".exe");
+        name = stem.chars().take(1).flat_map(char::to_uppercase).chain(stem.chars().skip(1)).collect();
+    }
+    NAMES.with_borrow_mut(|m| m.insert(exe.to_string(), name.clone()));
+    name
 }
 
 pub(crate) fn toggle_shown(key: &str) {

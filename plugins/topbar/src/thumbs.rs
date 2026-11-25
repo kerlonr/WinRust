@@ -109,6 +109,54 @@ pub(crate) unsafe fn unregister(host: HWND, ids: &mut Vec<isize>) {
     });
 }
 
+thread_local! {
+    static RING: Cell<(usize, [f32; 4], u64)> = const { Cell::new((0, [0.0; 4], 0)) }; // the selection ring: popup, where it is, when it moved
+    static SLIDE: RefCell<HashMap<usize, (u64, (i32, i32), (i32, i32))>> = RefCell::new(HashMap::new()); // popups on their way: start, from, to
+}
+
+/// Puts a popup at `from` and lets it glide to `to` (timer 2 of its window calls `slide_step`).
+pub(crate) unsafe fn slide_to(h: HWND, from: (i32, i32), to: (i32, i32), w: i32, hh: i32) {
+    let from = if line_icons() { from } else { to };
+    SLIDE.with_borrow_mut(|m| m.insert(h as usize, (now_ms(), from, to)));
+    SetWindowPos(h, HWND_TOPMOST, from.0, from.1, w, hh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if from != to {
+        SetTimer(h, 2, FRAME, None);
+    }
+}
+
+pub(crate) unsafe fn slide_step(h: HWND) {
+    let Some((t0, a, b)) = SLIDE.with_borrow(|m| m.get(&(h as usize)).copied()) else { return };
+    let t = (now_ms().saturating_sub(t0) as f32 / 220.0).min(1.0);
+    let p = 1.0 - (1.0 - t).powi(4);
+    let at = |a: i32, b: i32| a + ((b - a) as f32 * p).round() as i32;
+    SetWindowPos(h, null_mut(), at(a.0, b.0), at(a.1, b.1), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if t >= 1.0 {
+        KillTimer(h, 2);
+    }
+}
+
+/// Where the selection ring is drawn now on its way to card `c` (timer 3 repaints while it moves).
+unsafe fn ring(host: HWND, c: &RECT) -> RECT {
+    let want = [c.left as f32, c.top as f32, c.right as f32, c.bottom as f32];
+    let (h, mut at, t) = RING.get();
+    let now = now_ms();
+    let age = now.saturating_sub(t);
+    if h != host as usize || age > 600 || !line_icons() {
+        at = want;
+    } else {
+        let k = 1.0 - (-(age.min(50) as f32) / 45.0).exp();
+        (0..4).for_each(|i| at[i] += (want[i] - at[i]) * k);
+    }
+    if (0..4).any(|i| (want[i] - at[i]).abs() > 0.6) {
+        SetTimer(host, 3, FRAME, None);
+    } else {
+        at = want;
+        KillTimer(host, 3);
+    }
+    RING.set((host as usize, at, now));
+    RECT { left: at[0] as i32, top: at[1] as i32, right: at[2] as i32, bottom: at[3] as i32 }
+}
+
 /// Paints the cards (background, title row with icon and close box, big icon where DWM shows no preview) of `host`.
 /// `sel` gets the accent ring.
 pub(crate) unsafe fn paint(host: HWND, wins: &[HWND], rects: &[RECT], ids: &[isize], sel: Option<usize>) {
@@ -122,11 +170,12 @@ pub(crate) unsafe fn paint(host: HWND, wins: &[HWND], rects: &[RECT], ids: &[isi
     let f = CreateFontW(-sc(12), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, wide(ui_face()).as_ptr());
     let of = SelectObject(mem, f);
     SetBkMode(mem, TRANSPARENT as i32);
+    if let Some(c) = sel.and_then(|k| rects.get(k)) {
+        let moving = ring(host, c);
+        fill(mem, moving, pal().accent, sc(12));
+    }
     for (k, (&w, c)) in wins.iter().zip(rects).enumerate() {
         let on = sel == Some(k);
-        if on {
-            fill(mem, *c, pal().accent, sc(12));
-        }
         fill(mem, RECT { left: c.left + sc(2), top: c.top + sc(2), right: c.right - sc(2), bottom: c.bottom - sc(2) }, if on { pal().active } else { pal().hover }, sc(10));
         let ic = CARD_ICONS.with_borrow(|all| all.get(&(host as usize)).and_then(|icons| icons.get(k)).copied().unwrap_or(null_mut()));
         let ic = if ic.is_null() { LoadIconW(null_mut(), IDI_APPLICATION) } else { ic };
@@ -187,12 +236,17 @@ unsafe fn layout(pv: HWND, wins: Vec<HWND>, cx: i32) {
     let mut ids = old.2;
     unregister(pv, &mut ids);
     round_window(pv, w, h, 18);
+    let seen = IsWindowVisible(pv) != 0;
+    let mut was: RECT = zeroed();
+    GetWindowRect(pv, &mut was);
     if vert() {
         let y = (cx - h / 2).clamp(sc(4), sch - h - sc(4));
         SetWindowPos(pv, HWND_TOPMOST, side_x(w), y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     } else {
         let x = (cx - w / 2).clamp(sc(4), scw - w - sc(4));
-        SetWindowPos(pv, HWND_TOPMOST, x, if at_top() { bar_h() - bar_off() + sc(6) } else { bar_top() + bar_off() - h - sc(6) }, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        let y = if at_top() { bar_h() - bar_off() + sc(6) } else { bar_top() + bar_off() - h - sc(6) };
+        // from one button's previews to the next they glide along the bar; the first time they rise from it
+        slide_to(pv, if seen { (was.left, y) } else { (x, y + if at_top() { -sc(14) } else { sc(14) }) }, (x, y), w, h);
     }
     let ids = register(pv, &wins, &rects);
     PV.set((wins, rects, ids, None));
@@ -244,6 +298,8 @@ pub(crate) unsafe extern "system" fn pv_proc(hwnd: HWND, msg: u32, wp: WPARAM, l
                 force_fg(w);
             }
         }
+        WM_TIMER if wp == 2 => slide_step(hwnd),
+        WM_TIMER if wp == 3 => _ = InvalidateRect(hwnd, null(), 0),
         WM_TIMER if wp == 1 => {
             let mut pt = POINT { x: 0, y: 0 };
             GetCursorPos(&mut pt);

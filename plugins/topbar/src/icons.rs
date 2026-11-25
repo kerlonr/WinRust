@@ -35,6 +35,20 @@ pub(crate) unsafe fn remember(ic: HICON, color: HBITMAP, px: i32) {
     }
 }
 
+/// `remember` for an icon of any origin (a tray icon).
+pub(crate) unsafe fn remember_icon(ic: HICON) {
+    let mut ii: ICONINFO = zeroed();
+    if GetIconInfo(ic, &mut ii) == 0 {
+        return;
+    }
+    let mut b: BITMAP = zeroed();
+    if !ii.hbmColor.is_null() && GetObjectW(ii.hbmColor, size_of::<BITMAP>() as i32, &mut b as *mut _ as *mut _) != 0 && b.bmWidth == b.bmHeight && (8..=256).contains(&b.bmWidth) {
+        remember(ic, ii.hbmColor, b.bmWidth);
+    }
+    DeleteObject(ii.hbmColor);
+    DeleteObject(ii.hbmMask);
+}
+
 /// Drops the smooth copy of an icon about to be destroyed.
 pub(crate) unsafe fn forget_icon(ic: HICON) {
     if let Some((b, _)) = SMOOTH.with_borrow_mut(|m| m.remove(&(ic as usize))) {
@@ -283,6 +297,17 @@ unsafe fn shape(i: &Ink, s: &str) -> bool {
             i.line(&[(14.0, 11.0), (17.0, 11.0)]);
             i.line(&[(7.0, 15.0), (8.5, 15.0)]);
             i.line(&[(11.5, 15.0), (17.0, 15.0)]);
+        }
+        // pin
+        "\u{E718}" => {
+            i.line(&[(8.5, 4.0), (15.5, 4.0)]);
+            i.line(&[(10.0, 4.0), (10.0, 9.5), (6.5, 14.0), (17.5, 14.0), (14.0, 9.5), (14.0, 4.0)]);
+            i.line(&[(12.0, 14.0), (12.0, 20.5)]);
+        }
+        // cross
+        "\u{E711}" => {
+            i.line(&[(6.5, 6.5), (17.5, 17.5)]);
+            i.line(&[(17.5, 6.5), (6.5, 17.5)]);
         }
         "\u{E76C}" => i.line(&[(9.0, 5.5), (15.5, 12.0), (9.0, 18.5)]),  // chevron right
         "\u{E70E}" => i.line(&[(5.5, 15.0), (12.0, 8.5), (18.5, 15.0)]), // chevron up
