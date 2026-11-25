@@ -128,7 +128,22 @@ const BAR_H: i32 = 40;
 const NONE: i32 = -1;
 const SEARCH: i32 = -10;
 const TASKVIEW: i32 = -14; // Task View button (virtual desktops), right of search (#83)
-const LEAD: i32 = 2; // slots before Start: search, Task View
+/// Slots before Start: search, Task View. The Delphos style has neither.
+fn lead() -> i32 {
+    if line_icons() { 0 } else { 2 }
+}
+/// Start stays in the exact middle of the screen, the apps spread to both sides of it (Delphos, bottom bar).
+fn centered() -> bool {
+    airy() && !i18n::style::align_left()
+}
+/// How many slots right (+) or left (-) of Start button `i` sits: 1, -1, 2, -2...
+fn side_slot(i: i32) -> i32 {
+    if i % 2 == 1 { (i + 1) / 2 } else { -(i / 2) }
+}
+/// Left edge of button `i` along the bar (0 = Start; -lead() and up: search, Task View).
+fn btn_x(l: &Layout, i: i32) -> i32 {
+    l.x0 + if centered() { side_slot(i) } else { i + lead() } * (l.bw + l.gap)
+}
 const CLOCK: i32 = -4;
 const LANG: i32 = -6;
 const WIFI_I: i32 = -7;
@@ -1477,10 +1492,17 @@ fn layout(w: i32) -> Layout {
     let sys = (clock.0 - sc(4) - sc(if slim { if bat { 170 } else { 134 } } else { 150 + if bat { 66 } else { 0 } }), clock.0 - sc(4));
     let apps = (sys.0 - tcell() * tray_count() as i32, sys.0);
     let margin = (w - apps.0) + sc(8); // keep the button group centered and clear of both sides
-    let n = BTNS.with_borrow(|b| b.len()) as i32 + LEAD; // + the search and Task View slots
-    let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), sc(44 + if slim { 2 } else { 0 } + [-6, 0, 8][i18n::style::bar_size() as usize % 3]));
+    let n = BTNS.with_borrow(|b| b.len()) as i32 + lead(); // + the search and Task View slots
+    let full = sc(44 + if slim { 2 } else { 0 } + [-6, 0, 8][i18n::style::bar_size() as usize % 3]);
+    if centered() {
+        // half of Start and k buttons must fit between the middle and the tray side (the narrower one)
+        let k = n / 2;
+        let bw = ((w / 2 - margin - k * gap) * 2 / (2 * k + 1)).clamp(sc(16), full);
+        return Layout { x0: (w - bw) / 2, bw, gap, apps, sys, clock };
+    }
+    let bw = (((w - 2 * margin + gap) / n.max(1)) - gap).clamp(sc(16), full);
     // centered on search + Start + pins only: opening an unpinned window adds a button on the right instead of shifting Start left
-    let fixed = (PINS.with_borrow(|p| p.len()) as i32 + LEAD + 1).min(n);
+    let fixed = (PINS.with_borrow(|p| p.len()) as i32 + lead() + 1).min(n);
     // ...but never so far right that the windows' buttons run into the tray: then the whole row shifts left
     let right_limit = w - margin - (n * (bw + gap) - gap);
     let centered = (w - (fixed * (bw + gap) - gap)) / 2;
@@ -1508,9 +1530,13 @@ unsafe fn hit(hwnd: HWND, x: i32, y: i32) -> i32 {
     if x >= l.apps.0 {
         return TAPP + (x - l.apps.0) / tcell();
     }
-    let n = BTNS.with_borrow(|b| b.len()) as i32 + LEAD;
-    let (d, i) = (x - l.x0, (x - l.x0) / (l.bw + l.gap));
-    if d < 0 || d % (l.bw + l.gap) >= l.bw || i >= n { NONE } else if i == 0 { SEARCH } else if i == 1 { TASKVIEW } else { i - LEAD }
+    let n = BTNS.with_borrow(|b| b.len()) as i32;
+    match (-lead()..n).find(|&i| (0..l.bw).contains(&(x - btn_x(&l, i)))) {
+        None => NONE,
+        Some(-2) => SEARCH,
+        Some(-1) => TASKVIEW,
+        Some(i) => i,
+    }
 }
 
 // ---------- animation ----------
@@ -1569,6 +1595,22 @@ unsafe fn glide(key: i32, target: f32) -> f32 {
     v
 }
 
+/// Where the button known by `key` is drawn on its way to `want`.
+unsafe fn settle(key: isize, want: i32) -> i32 {
+    let now = now_ms();
+    SETTLE.with_borrow_mut(|m| {
+        if m.len() > 512 {
+            m.clear();
+        }
+        let e = m.entry(key).or_insert((want as f32, now));
+        let dt = now.saturating_sub(e.1).min(50) as f32;
+        e.1 = now;
+        e.0 += (want as f32 - e.0) * (1.0 - (-dt / 75.0).exp());
+        if (want as f32 - e.0).abs() < 0.6 { e.0 = want as f32 } else { BUSY.set(true) }
+        e.0.round() as i32
+    })
+}
+
 /// How far the icon of pin `p` is off its place while its app starts: two soft hops a second until a window shows (4 s at most).
 unsafe fn launch_hop(p: usize, up: bool) -> f32 {
     let (lp, t0) = LAUNCHED.get();
@@ -1592,6 +1634,7 @@ unsafe fn glow(dc: HDC, key: i32, on: bool, r: RECT, from: u32, to: u32, rad: i3
 thread_local! {
     static PRESS: Cell<(i32, u64)> = const { Cell::new((i32::MIN, 0)) }; // last clicked element and when
     static GLIDE: RefCell<HashMap<i32, (f32, u64)>> = RefCell::new(HashMap::new());
+    static SETTLE: RefCell<HashMap<isize, (f32, u64)>> = RefCell::new(HashMap::new());
     static LAUNCHED: Cell<(i32, u64)> = const { Cell::new((-1, 0)) }; // the pin started last and when
     static SEEN: RefCell<HashMap<isize, u64>> = RefCell::new(HashMap::new()); // when each taskbar button first showed
 }
@@ -1923,16 +1966,18 @@ unsafe fn paint_vert(dc: HDC, cr: RECT, fonts: [HFONT; 4]) {
     SelectObject(dc, f_glyph);
     sym(dc, "\u{E713}", gr, if hot == GEAR { pal().text } else { dim });
 
-    let sb = cell(l.x0, l.bw);
-    glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, sc(8));
-    sym(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { dim });
-    let tb = cell(l.x0 + l.bw + l.gap, l.bw);
-    glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, sc(8));
-    sym(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { dim });
+    if lead() > 0 {
+        let sb = cell(l.x0, l.bw);
+        glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, sc(8));
+        sym(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { dim });
+        let tb = cell(l.x0 + l.bw + l.gap, l.bw);
+        glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, sc(8));
+        sym(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { dim });
+    }
 
     BTNS.with_borrow(|btns| {
         for (i, b) in btns.iter().enumerate() {
-            let y = l.x0 + (i as i32 + LEAD) * (l.bw + l.gap);
+            let y = btn_x(&l, i as i32);
             let r = cell(y, l.bw);
             let mid = y + l.bw / 2;
             let act = b.wins.contains(&fg);
@@ -2187,9 +2232,7 @@ unsafe fn paint(hwnd: HWND) {
 
     // Delphos: one highlight that glides to the button under the pointer, and icons that swell around the pointer like a dock's
     let spot = match hot {
-        SEARCH => Some(0),
-        TASKVIEW => Some(1),
-        h if h >= 0 => Some(h + LEAD),
+        h if h >= 0 => Some(btn_x(&l, h)),
         _ => None,
     };
     let near = hv(4000, spot.is_some() && line_icons());
@@ -2205,7 +2248,7 @@ unsafe fn paint(hwnd: HWND) {
     let mag_x = MAG_X.with(|c| follow(c, MOUSE_X.get(), 40.0));
     let mag = |cx: f32| near * (-((cx - mag_x) / (l.bw as f32 * 1.05)).powi(2)).exp();
     if line_icons() {
-        let want = spot.map_or(PILL.get().0, |s| (l.x0 + s * (l.bw + l.gap)) as f32);
+        let want = spot.map_or(PILL.get().0, |x| x as f32);
         let x = PILL.with(|c| follow(c, want, 45.0)) as i32;
         if near > 0.01 {
             fill(dc, cell(x, l.bw), mix(pal().bg, pal().hover, near), inner());
@@ -2213,22 +2256,22 @@ unsafe fn paint(hwnd: HWND) {
     }
 
     // search button (left of Start)
-    let sb = RECT { left: l.x0, top, right: l.x0 + l.bw, bottom: bot };
-    if !line_icons() {
+    if lead() > 0 {
+        let sb = RECT { left: l.x0, top, right: l.x0 + l.bw, bottom: bot };
         glow(dc, SEARCH, hot == SEARCH, sb, pal().bg, pal().hover, inner());
-    }
-    SelectObject(dc, f_glyph);
-    sym_t(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) }, 2.0 * mag((sb.left + sb.right) as f32 / 2.0), press_t(SEARCH));
-    let tb = RECT { left: l.x0 + l.bw + l.gap, top, right: l.x0 + 2 * l.bw + l.gap, bottom: bot };
-    if !line_icons() {
+        SelectObject(dc, f_glyph);
+        sym(dc, "\u{E721}", sb, if hot == SEARCH { pal().text } else { mix(pal().dim, pal().text, 0.5) });
+        let tb = RECT { left: l.x0 + l.bw + l.gap, top, right: l.x0 + 2 * l.bw + l.gap, bottom: bot };
         glow(dc, TASKVIEW, hot == TASKVIEW, tb, pal().bg, pal().hover, inner());
+        sym(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { mix(pal().dim, pal().text, 0.5) });
     }
-    sym_t(dc, "\u{E7C4}", tb, if hot == TASKVIEW { pal().text } else { mix(pal().dim, pal().text, 0.5) }, 2.0 * mag((tb.left + tb.right) as f32 / 2.0), press_t(TASKVIEW));
 
     // Start, pinned apps, open windows (center)
     BTNS.with_borrow(|btns| {
         for (i, b) in btns.iter().enumerate() {
-            let x = l.x0 + (i as i32 + LEAD) * (l.bw + l.gap);
+            // a button whose place changed (an app before it closed) glides there
+            let place = btn_x(&l, i as i32);
+            let x = if i > 0 && line_icons() { settle(b.pin.map(|p| -(p as isize) - 1).or_else(|| b.wins.first().map(|&w| w as isize)).unwrap_or(0), place) } else { place };
             let r = RECT { left: x, top, right: x + l.bw, bottom: bot };
             let act = b.wins.contains(&fg);
             let att = !act && FLASH.with_borrow(|f| b.wins.iter().any(|w| f.contains(w))); // flashing: lit until it is activated
@@ -3073,7 +3116,7 @@ unsafe fn min_rect(info: *mut ShellHookInfo, bar: HWND) {
     let exe = exe_of(w);
     let i = BTNS.with_borrow(|b| b.iter().position(|b| b.wins.contains(&w)).or_else(|| b.iter().position(|b| !exe.is_empty() && b.wins.first().is_some_and(|&x| exe_of(x) == exe))));
     let x = match i {
-        Some(i) => l.x0 + (i as i32 + LEAD) * (l.bw + l.gap),
+        Some(i) => btn_x(&l, i as i32),
         None => (l.x0 + l.apps.0) / 2, // no button (yet): the middle of the bar
     };
     if vert() {
@@ -3099,7 +3142,7 @@ unsafe fn tip_cx(l: &Layout, h: i32) -> i32 {
         VOL_I => l.sys.0 + sc(sys_ends().2 - 17),
         BAT_I => l.sys.0 + sc(sys_ends().2 + 18),
         t if (TAPP..TAPP + 100).contains(&t) => l.apps.0 + (t - TAPP) * tcell() + tcell() / 2,
-        i => l.x0 + (i + LEAD) * (l.bw + l.gap) + l.bw / 2,
+        i => btn_x(l, i) + l.bw / 2,
     }
 }
 
@@ -3221,7 +3264,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
             TrackMouseEvent(&mut tme);
             MOUSE_X.set(if vert() { (lp >> 16) as i16 as f32 } else { (lp & 0xffff) as i16 as f32 });
-            if line_icons() && (h >= 0 || h == SEARCH || h == TASKVIEW) {
+            if line_icons() && h >= 0 {
                 InvalidateRect(hwnd, null(), 0); // the magnifier follows
             }
             if HOT.replace(h) != h {
@@ -3528,6 +3571,11 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apps_spread_to_both_sides_of_start() {
+        assert_eq!((0..7).map(super::side_slot).collect::<Vec<_>>(), [0, 1, -1, 2, -2, 3, -3]);
+    }
+
     #[test]
     fn a_far_off_appbar_edge_goes_back_to_the_screen_edge() {
         assert_eq!(super::sane_edge(48, 1080), 48); // another bar below ours: stack above it

@@ -176,11 +176,30 @@ thread_local! {
     static NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
+/// The shell's display name of an item.
+unsafe fn shell_name(path: &str) -> Option<String> {
+    use windows::Win32::{System::Com::CoTaskMemFree, UI::Shell::{IShellItem, SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY}};
+    let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide(path).as_ptr()), None).ok()?;
+    let p = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
+    let s = p.to_string().ok();
+    CoTaskMemFree(Some(p.0 as *const _));
+    s.filter(|s| !s.is_empty())
+}
+
 /// What a person calls the program: the description in its exe, else the file name.
-pub(crate) unsafe fn app_name(exe: &str) -> String {
+pub(crate) unsafe fn app_name(exe: &str, w: HWND) -> String {
     use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
     if let Some(n) = NAMES.with_borrow(|m| m.get(exe).cloned()) {
         return n;
+    }
+    // a packaged app's exe is often called something internal: its Start menu name is the one people know
+    if exe.contains(r"\windowsapps\") {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(w, &mut pid);
+        if let Some(n) = aumid_of(pid).and_then(|id| shell_name(&format!(r"shell:AppsFolder\{id}"))) {
+            NAMES.with_borrow_mut(|m| m.insert(exe.to_string(), n.clone()));
+            return n;
+        }
     }
     let file = wide(exe);
     let size = GetFileVersionInfoSizeW(file.as_ptr(), null_mut());

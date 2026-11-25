@@ -109,7 +109,7 @@ fn swap(c: u32) -> u32 {
 }
 
 /// Blurs a picture, livens its colours, holds bright areas down and lays the tint (COLORREF) over it at strength `k`.
-fn frost(src: &[u32], w: usize, h: usize, tint: u32, k: f32) -> Vec<u32> {
+fn frost(src: &[u32], w: usize, h: usize, tint: u32, k: f32, aurora: f32) -> Vec<u32> {
     const D: usize = 8;
     let (sw, sh) = (w.div_ceil(D), h.div_ceil(D));
     let mut a: Vec<[f32; 3]> = Vec::with_capacity(sw * sh);
@@ -141,7 +141,7 @@ fn frost(src: &[u32], w: usize, h: usize, tint: u32, k: f32) -> Vec<u32> {
     let glow = |x: f32, y: f32, cx: f32, cy: f32| (-((x - cx) / 0.42).powi(2) - ((y - cy) / 0.75).powi(2)).exp();
     for (n, p) in a.iter_mut().enumerate() {
         let (x, y) = ((n % sw) as f32 / sw as f32, (n / sw) as f32 / sh as f32);
-        let (violet, ice) = (0.20 * glow(x, y, 0.12, 0.25), 0.15 * glow(x, y, 0.9, 0.85));
+        let (violet, ice) = (0.20 * aurora * glow(x, y, 0.12, 0.25), 0.15 * aurora * glow(x, y, 0.9, 0.85));
         let l = 0.3 * p[0] + 0.59 * p[1] + 0.11 * p[2];
         let hold = 1.0 - 0.45 * (l / 255.0); // light areas are pulled down so light text stays readable
         for (c, t) in p.iter_mut().zip(t) {
@@ -208,7 +208,7 @@ pub(crate) unsafe fn capture(r: RECT, flush: bool) -> Option<Backdrop> {
     let scr = GetDC(null_mut());
     BitBlt(d.dc, 0, 0, w, h, scr, x, y, SRCCOPY);
     ReleaseDC(null_mut(), scr);
-    let px = frost(d.pixels(), w as usize, h as usize, pal().bg, strength());
+    let px = frost(d.pixels(), w as usize, h as usize, pal().bg, strength(), 1.0);
     d.free();
     Some(Backdrop { x, y, w, h, px })
 }
@@ -240,7 +240,7 @@ unsafe fn wallpaper(x: i32, y: i32, w: i32, h: i32) -> Option<Backdrop> {
         }
         GdipDisposeImage(img as *mut GpImage);
     }
-    let px = frost(d.pixels(), w as usize, h as usize, pal().bg, strength());
+    let px = frost(d.pixels(), w as usize, h as usize, pal().bg, strength(), 0.5); // the wallpaper has its own colour
     d.free();
     Some(Backdrop { x, y, w, h, px })
 }
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn frosting_keeps_the_size_and_is_smooth() {
-        let out = frost(&vec![0x406080; 37 * 21], 37, 21, swap(0x1B1B1E), 0.5);
+        let out = frost(&vec![0x406080; 37 * 21], 37, 21, swap(0x1B1B1E), 0.5, 1.0);
         assert_eq!(out.len(), 37 * 21);
         // no noise: neighbours differ by a step of the gradient at most
         assert!(out.windows(2).enumerate().filter(|(i, _)| (i + 1) % 37 != 0).all(|(_, w)| (w[0] >> 8 & 255).abs_diff(w[1] >> 8 & 255) <= 4));

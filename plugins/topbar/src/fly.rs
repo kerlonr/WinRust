@@ -1970,7 +1970,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             let kept = bar_idx();
             for (rc, a) in rects(k) {
                 let Act::Tray(i) = a else { continue };
-                let Some((_, exe, tip, key, ic)) = tray_item(i) else { continue };
+                let Some((id, exe, tip, key, ic)) = tray_item(i) else { continue };
                 let row = (i - SCROLL.get()) as i32;
                 let t = rise(1 + row);
                 let seen = |c: u32| mix(pal().bg, c, t);
@@ -1989,7 +1989,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     fly_icon(dc, ic, (rc.left + sc(26)) as f32, cy as f32, size);
                 }
                 let armed = CONFIRM.get() == 100 + i as i32;
-                let name = app_name(&exe);
+                let name = app_name(&exe, id.0);
                 let line = tip.lines().next().unwrap_or("").trim().to_string();
                 let sub = if armed { t!("Нажмите ещё раз, чтобы завершить", "Click again to end it", ja: "もう一度クリックで終了", pt: "Clique de novo para encerrar", zh: "再次点击以结束").to_string() } else if line.eq_ignore_ascii_case(&name) { String::new() } else { line };
                 let left = rc.left + sc(50) + (th * sc(2) as f32) as i32;
