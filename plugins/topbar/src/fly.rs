@@ -33,10 +33,9 @@ enum Act {
     Settings(&'static str),
     Menu(u8),
     Tray(usize),    // index into tray_list()
-    TrayPin(usize), // keep on the bar, or not
-    TrayEnd(usize), // end the app (two clicks)
     Hit(usize),  // Delphos Start: an item of the grid or the results
     AllApps,     // all apps <-> pinned
+    Choose,      // choosing what Start shows: begin / done
     Explorer,
     PowerMenu,
     CalPrev,
@@ -98,7 +97,7 @@ fn phy_name(t: i32) -> &'static str {
     }
 }
 
-static APPS: Mutex<Vec<(String, Vec<u16>)>> = Mutex::new(Vec::new()); // Start menu shortcuts: (name, .lnk path)
+pub(crate) static APPS: Mutex<Vec<(String, Vec<u16>)>> = Mutex::new(Vec::new()); // Start menu shortcuts: (name, .lnk path)
 pub static PREVIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false); // `--preview`: stays open without focus
 static BRIGHT: AtomicI32 = AtomicI32::new(-1); // -1 = no controllable display (desktop PC)
 const ROWS: usize = 11;
@@ -176,8 +175,39 @@ fn weekday_initials() -> [&'static str; 7] {
 
 // ---------- data ----------
 
+fn apps_file() -> PathBuf {
+    PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join(r"WinRust\apps.txt")
+}
+
+/// The apps as they were last time: there at once, while load_apps looks again.
+fn apps_kept() {
+    let Ok(s) = std::fs::read_to_string(apps_file()) else { return };
+    let v: Vec<_> = s.lines().filter_map(|l| l.split_once('\t')).map(|(n, p)| (n.to_string(), wide(p))).collect();
+    let mut a = APPS.lock().unwrap();
+    if a.is_empty() {
+        *a = v;
+    }
+}
+
+/// When the bar starts: Start's apps and icons, so it opens complete.
+pub fn warm_up() {
+    if line_icons() {
+        apps_kept();
+        start::preload();
+        start::warm();
+    }
+}
+
 /// Background: collects the Start menu shortcuts once.
 pub fn load_apps() {
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !RUNNING.swap(true, Relaxed) {
+        load_apps_now(); // one look at a time
+        RUNNING.store(false, Relaxed);
+    }
+}
+
+fn load_apps_now() {
     fn walk(dir: &std::path::Path, depth: u8, out: &mut Vec<(String, Vec<u16>)>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();
@@ -207,7 +237,15 @@ pub fn load_apps() {
     }
     v.sort_by_key(|a| a.0.to_lowercase());
     v.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
-    *APPS.lock().unwrap() = v;
+    let mut a = APPS.lock().unwrap();
+    if *a == v {
+        return;
+    }
+    *a = v.clone();
+    drop(a);
+    let f = apps_file();
+    let _ = f.parent().map(std::fs::create_dir_all);
+    let _ = std::fs::write(f, v.iter().map(|(n, p)| format!("{n}\t{}\n", wstr(p))).collect::<String>());
 }
 
 /// (display name, app id) of everything in the shell's Apps folder (what the Windows Start menu lists).
@@ -275,6 +313,8 @@ fn score(name: &str, q: &str) -> Option<u8> {
 
 // ---------- apps pinned to the Start panel (empty at first; added from right-click menus) ----------
 
+static CHOSEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false); // the user has chosen what Start shows (the file is there)
+static GONE: Mutex<Vec<String>> = Mutex::new(Vec::new()); // pinned files that are no longer there
 static PINNED: Mutex<Vec<String>> = Mutex::new(Vec::new()); // paths of .lnk / .exe files, in the order they were added
 
 fn pin_file() -> PathBuf {
@@ -282,7 +322,28 @@ fn pin_file() -> PathBuf {
 }
 
 fn pinned_load() {
-    *PINNED.lock().unwrap() = std::fs::read_to_string(pin_file()).map(|s| s.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+    let file = std::fs::read_to_string(pin_file());
+    CHOSEN.store(file.is_ok(), Relaxed);
+    let v: Vec<String> = file.map(|s| s.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+    // only on the Windows drive: another may be asleep or away for now
+    let drive = std::env::var("SystemDrive").unwrap_or_default().to_lowercase() + r"\";
+    *GONE.lock().unwrap() = v.iter().filter(|p| p.to_lowercase().starts_with(&drive) && !std::path::Path::new(p).exists()).cloned().collect();
+    *PINNED.lock().unwrap() = v;
+}
+
+fn pinned_save() {
+    let p = PINNED.lock().unwrap();
+    let _ = std::fs::write(pin_file(), p.join("\n"));
+    CHOSEN.store(true, Relaxed);
+}
+
+/// From here on the list is the user's own: it begins as what Start shows now.
+fn chosen() {
+    if line_icons() && !CHOSEN.load(Relaxed) {
+        let now = start::defaults(&APPS.lock().unwrap());
+        *PINNED.lock().unwrap() = now;
+        CHOSEN.store(true, Relaxed);
+    }
 }
 
 fn wstr(w: &[u16]) -> String {
@@ -290,6 +351,9 @@ fn wstr(w: &[u16]) -> String {
 }
 
 pub fn start_pinned(path: &str) -> bool {
+    if line_icons() {
+        return start::current(&APPS.lock().unwrap()).iter().any(|p| p.eq_ignore_ascii_case(path));
+    }
     PINNED.lock().unwrap().iter().any(|p| p.eq_ignore_ascii_case(path))
 }
 
@@ -309,8 +373,8 @@ unsafe fn on_files(hw: HWND, hd: HDROP) {
     DragFinish(hd);
     note(&match added.len() {
         0 => t!("Уже в Пуске", "Already in Start", ja: "すでにスタートにあります", pt: "Já está no Iniciar", zh: "已在开始菜单中").to_string(),
-        1 => format!("Added to Start: {}", added[0]),
-        n => format!("Added {n} items to Start"),
+        1 => format!("{}: {}", t!("Добавлено в Пуск", "Added to Start", ja: "スタートに追加", pt: "Adicionado ao Iniciar", zh: "已添加到开始菜单"), added[0]),
+        n => format!("{}: {n}", t!("Добавлено в Пуск", "Added to Start", ja: "スタートに追加", pt: "Adicionados ao Iniciar", zh: "已添加到开始菜单")),
     });
     KillTimer(hw, 6);
     InvalidateRect(hw, null(), 0);
@@ -342,12 +406,14 @@ pub fn note(s: &str) {
 
 /// Adds the app to the Start panel, or removes it when it is already there.
 pub fn start_toggle(path: &str) {
+    chosen();
     let mut p = PINNED.lock().unwrap();
     match p.iter().position(|x| x.eq_ignore_ascii_case(path)) {
         Some(i) => drop(p.remove(i)),
         None => p.push(path.to_string()),
     }
-    let _ = std::fs::write(pin_file(), p.join("\n"));
+    drop(p);
+    pinned_save();
 }
 
 static EXE_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -646,7 +712,10 @@ fn size(k: Kind) -> (i32, i32) {
         Kind::Start if line_icons() => (start::W, start::H),
         Kind::Start => (560, 640),
         Kind::Menu => (MW, menu_rows().1),
-        Kind::Tray => (TW, 54 + TROW * (tray_list().len().clamp(1, TROWS) as i32) + 10),
+        Kind::Tray => {
+            let n = tray_list().len();
+            if n == 0 { (236, 52) } else { (2 * TPAD + TCELL * tray_cols(n) as i32, 2 * TPAD + TCELL * n.div_ceil(tray_cols(n)).min(TROWS) as i32) }
+        }
     }
 }
 
@@ -765,15 +834,15 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
             v
         }
         Kind::Tray => {
-            let (n, s) = (tray_list().len(), SCROLL.get());
-            let mut v = vec![];
-            for i in 0..TROWS.min(n.saturating_sub(s)) {
-                let t = 54 + TROW * i as i32;
-                v.push((r(8, t, w - 8, t + TROW - 2), Act::Tray(s + i)));
-                v.push((r(w - 84, t + 9, w - 54, t + 39), Act::TrayPin(s + i)));
-                v.push((r(w - 50, t + 9, w - 20, t + 39), Act::TrayEnd(s + i)));
-            }
-            v
+            let n = tray_list().len();
+            let cols = tray_cols(n);
+            let s = SCROLL.get().min(n.div_ceil(cols).saturating_sub(TROWS));
+            (s * cols..((s + TROWS) * cols).min(n))
+                .map(|i| {
+                    let (x, y) = (TPAD + TCELL * (i % cols) as i32, TPAD + TCELL * (i / cols - s) as i32);
+                    (r(x, y, x + TCELL, y + TCELL), Act::Tray(i))
+                })
+                .collect()
         }
         Kind::Menu => {
             let heads: Vec<bool> = MITEMS.with_borrow(|m| m.iter().map(|it| it.head).collect());
@@ -792,7 +861,8 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
 }
 
 fn act_at(k: Kind, x: i32, y: i32) -> Option<(RECT, Act)> {
-    rects(k).into_iter().rev().find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+    let found = rects(k).into_iter().rev().find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
+    found.filter(|f| k != Kind::Start || !line_icons() || !start::on_power(x, y) || matches!(f.1, Act::Power(_)))
 }
 
 // ---------- open / close ----------
@@ -931,6 +1001,9 @@ pub fn close() {
         return;
     }
     unsafe {
+        hide_tip(null_mut());
+        GRAB.set(None);
+        start::drop_drag(false);
         InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns back
         kill_ghost();
         GHOST.set((h, now_ms(), FIN.get()));
@@ -1001,6 +1074,23 @@ pub fn toggle_click(k: Kind) {
     toggle(k);
 }
 
+/// Screen x of a panel `w` px wide.
+unsafe fn panel_x(k: Kind, w: i32) -> i32 {
+    let sw = GetSystemMetrics(SM_CXSCREEN);
+    if vert() {
+        return side_x(w);
+    }
+    match k {
+        Kind::Start => (sw - w) / 2,
+        Kind::Menu => MENU_X.get().min(sw - w - sc(8)).max(sc(8)),
+        Kind::Tray => {
+            let (bx, bw) = bar_x_w();
+            (bx + layout(bw).apps.0 + tcell() / 2 - w / 2).min(sw - w - sc(8)).max(sc(8)) // above the chevron
+        }
+        _ => sw - w - sc(8),
+    }
+}
+
 pub fn toggle(k: Kind) {
     // The panel counts as open only while its window is alive: Alt+F4 (or anything else destroying the window behind our
     // back) leaves the state saying "open", and then every Win press would only "close" a dead window and never open a new
@@ -1016,6 +1106,10 @@ pub fn toggle(k: Kind) {
         GLIDE.with_borrow_mut(|m| m.retain(|k, _| *k < 1_000_000));
         TMENU.set((0, 0));
         start::ALL.set(false);
+        start::CHOOSE.set(None);
+        start::drop_drag(false);
+        GRAB.set(None);
+        start::retry();
         start::PMENU.set(0);
         SEL_SHOWN.set(false);
         CAL_TURN.set((0, 0));
@@ -1044,6 +1138,7 @@ pub fn toggle(k: Kind) {
                 }
                 crate::quick::refresh();
             }
+            Kind::Tray => tray_prune(),
             Kind::Start => {
                 pinned_load(); // the search card (rs-launcher) can add to this list from another process
                 std::thread::spawn(load_apps); // apps installed since the last open show up (the panel repaints every second)
@@ -1051,23 +1146,15 @@ pub fn toggle(k: Kind) {
             _ => {}
         }
         let (w, h) = (sc(size(k).0), sc(size(k).1));
-        let sw = GetSystemMetrics(SM_CXSCREEN);
-        let x = if vert() { side_x(w) } else { match k {
-            Kind::Start => (sw - w) / 2,
-            Kind::Menu => MENU_X.get().min(sw - w - sc(8)).max(sc(8)),
-            Kind::Tray => {
-                let (bx, bw) = bar_x_w();
-                (bx + layout(bw).apps.0 + tcell() / 2 - w / 2).min(sw - w - sc(8)).max(sc(8)) // above the chevron
-            }
-            _ => sw - w - sc(8),
-        } };
+        let x = panel_x(k, w);
         let class = wide("topbar_fly");
         let fy = if vert() && k == Kind::Menu { (MENU_X.get() - h / 2).clamp(sc(8), GetSystemMetrics(SM_CYSCREEN) - h - sc(8)) } else { pop_y(h) }; // above the bar (below it at the top of the screen)
         if line_icons() {
             let ghost = !GHOST.get().0.is_null();
             kill_ghost(); // the panel this one replaces must not end up in its glass
+            let wider = if k == Kind::Tray { x.min(sc(120)) } else { 0 }; // an app can come or go while it is open
             // room above for a list that grows and below for the opening slide
-            BACKDROP.set(crate::glass::capture(RECT { left: x, top: fy - sc(160), right: x + w, bottom: fy + h + sc(24) }, ghost));
+            BACKDROP.set(crate::glass::capture(RECT { left: x - wider, top: fy - sc(160), right: x + w + wider, bottom: fy + h + sc(24) }, ghost));
         }
         let hw = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, class.as_ptr(), null(), WS_POPUP, x, fy + sc(14), w, h, null_mut(), null_mut(), GetModuleHandleW(null()), null());
         if line_icons() {
@@ -1225,34 +1312,6 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
             _ => crate::quick::set_energy_saver(!crate::quick::energy_saver()),
         },
         Act::Tray(_) => {} // acts when the button comes up
-        Act::TrayPin(i) => {
-            if let Some((_, _, _, key, _)) = tray_item(i) {
-                toggle_shown(&key);
-                InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
-            }
-        }
-        Act::TrayEnd(i) => {
-            let Some((t, _, _, key, _)) = tray_item(i) else { return };
-            if key == "explorer.exe" || PREVIEW.load(Relaxed) {
-                return;
-            }
-            if CONFIRM.get() != 100 + i as i32 {
-                CONFIRM.set(100 + i as i32); // first click only arms it
-                return;
-            }
-            CONFIRM.set(-1);
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(t.0, &mut pid);
-            let p = OpenProcess(1, 0, pid); // PROCESS_TERMINATE
-            if !p.is_null() {
-                if TerminateProcess(p, 0) != 0 {
-                    TAPPS.with_borrow_mut(|v| v.retain(|x| x.hwnd != t.0 || { forget_icon(x.icon); DestroyIcon(x.icon); false }));
-                }
-                CloseHandle(p);
-            }
-            SCROLL.set(SCROLL.get().min(tray_list().len().saturating_sub(TROWS)));
-            InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
-        }
         Act::Mute => toggle_mute(),
         Act::Menu(i) => {
             close();
@@ -1324,9 +1383,12 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
         }
         Act::AllApps => {
             start::ALL.set(!start::ALL.get());
-            SCROLL.set(0);
-            SEL.set(0);
-            T0.set(now_ms()); // the other list comes in like the first one did
+            start::top();
+        }
+        Act::Choose => {
+            if !start::end_choosing() {
+                start::begin_choosing();
+            }
         }
         Act::Explorer => {
             start::explorer();
@@ -1429,9 +1491,87 @@ fn nested(k: Kind, gap: i32, old: i32) -> i32 {
     sc(if line_icons() { 2 * (panel_rad(k) - gap) } else { old })
 }
 
-const TW: i32 = 320; // background apps: panel width, row height, rows shown at once
-const TROW: i32 = 50;
-const TROWS: usize = 8;
+const TCELL: i32 = 44; // background apps: a grid of square cells, logical px
+const TPAD: i32 = 8;
+const TROWS: usize = 6; // shown at once
+
+/// Columns of the grid of `n` background apps: about as wide as it is high.
+fn tray_cols(n: usize) -> usize {
+    (1..).find(|c| c * c >= n).unwrap_or(1).clamp(3, 6).min(n.max(1))
+}
+
+thread_local! {
+    static GRAB: Cell<Option<(Act, i32, i32, bool)>> = const { Cell::new(None) }; // what the button went down on, where, and whether it became a drag
+}
+
+/// The list moved under a resting pointer: what it is over now.
+unsafe fn look_again(hw: HWND, k: Kind) {
+    let mut p: POINT = zeroed();
+    GetCursorPos(&mut p);
+    if GRAB.get().is_none() && WindowFromPoint(p) == hw {
+        ScreenToClient(hw, &mut p);
+        OVER.set(act_at(k, p.x, p.y).map(|a| a.1));
+    } else if k == Kind::Start {
+        OVER.set(None);
+    }
+}
+
+/// The apps in the background changed while their panel is open.
+pub fn tray_changed() {
+    let hw = FH.get();
+    if FLY.get() == Some(Kind::Tray) && !hw.is_null() {
+        unsafe {
+            OVER.set(None); // the cells moved
+            hide_tip(null_mut());
+            fit(hw, Kind::Tray);
+            InvalidateRect(hw, null(), 0);
+        }
+    }
+}
+
+/// The panel takes the size its contents need; it hangs above the bar, so it grows and shrinks upward.
+unsafe fn fit(hw: HWND, k: Kind) {
+    let (w, h) = (sc(size(k).0), sc(size(k).1));
+    let (x, y) = (if k == Kind::Tray { panel_x(k, w) } else { FIN.get().0 }, pop_y(h));
+    let mut wr: RECT = zeroed();
+    GetWindowRect(hw, &mut wr);
+    if FIN.replace((x, y)) == (x, y) && (wr.right - wr.left, wr.bottom - wr.top) == (w, h) {
+        return;
+    }
+    SetWindowPos(hw, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    if !line_icons() {
+        round_window(hw, w, h, 16);
+    }
+}
+
+/// Which tray icons stay on the bar (Windows 11's "Other system tray icons"): a tick per app.
+pub fn tray_menu(x: i32) {
+    let mut apps: Vec<(String, String, HICON)> = vec![];
+    for (key, hwnd, icon) in TAPPS.with_borrow(|t| t.iter().filter(|t| !t.hidden).map(|t| (t.key.clone(), t.hwnd, t.icon)).collect::<Vec<_>>()) {
+        if !apps.iter().any(|a| a.0 == key) && apps.len() < 14 {
+            apps.push((key, unsafe { app_name(&exe_of(hwnd), hwnd) }, icon));
+        }
+    }
+    if apps.is_empty() {
+        return;
+    }
+    let kept: Vec<String> = SHOWN.with_borrow(|s| s.clone()).unwrap_or_default();
+    let mut items = vec![MItem::head(t!("Показывать на панели", "Show on the bar", ja: "バーに表示", pt: "Mostrar na barra", zh: "在任务栏上显示"))];
+    items.extend(apps.iter().map(|a| MItem { icon: a.2, ..MItem::new(a.1.clone()) }.on(kept.contains(&a.0))));
+    menu(x, None, items, move |i| {
+        if let Some(a) = i.checked_sub(1).and_then(|i| apps.get(i)) {
+            toggle_shown(&a.0);
+            unsafe { InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0) };
+        }
+    });
+}
+
+/// What the tooltip of background app `i` says: its own words, else its name.
+unsafe fn tray_tip(i: usize) -> String {
+    let Some((t, exe, tip, ..)) = tray_item(i) else { return String::new() };
+    let tip = tip.trim();
+    if tip.is_empty() { app_name(&exe, t.0) } else { tip.to_string() }
+}
 
 /// The tray icon behind row `i`: window, id, message, version; its exe, what it says, its key.
 unsafe fn tray_item(i: usize) -> Option<((HWND, u32, u32, u32), String, String, String, HICON)> {
@@ -1446,10 +1586,7 @@ unsafe fn tray_do(i: usize, left: bool) {
     let mut pid = 0u32;
     GetWindowThreadProcessId(t.0, &mut pid);
     TMENU.set(if left { (0, 0) } else { (pid, now_ms()) });
-    tray_click(t, left);
-    if left {
-        close();
-    }
+    tray_click(t, left); // what it opens takes the focus and so closes the panel; until then a second click makes a double click
 }
 
 /// The app's menu is up (timer 7, after the panel lost the focus to it): the panel stays until the menu is gone.
@@ -1573,8 +1710,8 @@ unsafe fn paint(hw: HWND, k: Kind) {
     let (w, h) = size(k);
     let over = OVER.get();
     let hot = |a: Act| over == Some(a);
-    // hover highlight that fades; the key is the element's position (flyout keys start at 1_000_000)
-    let g = |a: Act, rc: RECT, from: u32, to: u32, rad: i32| glow(dc, rc.top * 4096 + rc.left + 1_000_000, hot(a), rc, from, to, rad);
+    // hover highlight that fades; the key is the element's position, clear of the panels' own keys (flyout keys start at 1_000_000)
+    let g = |a: Act, rc: RECT, from: u32, to: u32, rad: i32| glow(dc, rc.top * 4096 + rc.left + 100_000_000, hot(a), rc, from, to, rad);
     let (vol, muted) = VOL.get();
 
     match k {
@@ -1875,7 +2012,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     Link::NoInternet(_) => Some((t!("Подключено, но интернета нет", "Connected, no internet", ja: "接続済み、インターネットなし", pt: "Conectado, sem internet", zh: "已连接，无 Internet").to_string(), WARN)),
                     Link::Cable => Some((t!("Интернет по кабелю", "Online over a cable", ja: "有線でオンライン", pt: "Online por cabo", zh: "有线联网").into(), pal().dim)),
                     Link::Offline if on => Some((t!("Не подключено", "Not connected", ja: "未接続", pt: "Não conectado", zh: "未连接").into(), pal().dim)),
-                    Link::Offline => Some((t!("Выключен", "Turned off", ja: "オフ", pt: "Desligado", zh: "已关闭").into(), pal().dim)),
+                    Link::Joining | Link::Offline => Some((t!("Выключен", "Turned off", ja: "オフ", pt: "Desligado", zh: "已关闭").into(), pal().dim)),
                 }
             };
             SelectObject(dc, f_title);
@@ -2050,65 +2187,35 @@ unsafe fn paint(hw: HWND, k: Kind) {
             }
         }
         Kind::Tray => {
-            let t = rise(0);
-            SelectObject(dc, f_title);
-            text(dc, t!("В фоне", "In the background", ja: "バックグラウンド", pt: "Em segundo plano", zh: "后台运行"), drop_by(r(20, 12, w - 60, 46), t), mix(pal().bg, pal().text, t), DT_LEFT);
-            let list = tray_list();
-            SelectObject(dc, f_small);
-            if !list.is_empty() {
-                text(dc, &list.len().to_string(), drop_by(r(w - 60, 12, w - 22, 46), t), mix(pal().bg, pal().dim, t), DT_RIGHT);
-            } else {
-                text(dc, t!("Здесь пока пусто", "Nothing here yet", ja: "まだ何もありません", pt: "Nada rodando em segundo plano", zh: "这里还什么都没有"), r(20, 54, w - 20, 54 + TROW), pal().dim, DT_LEFT);
+            let rs = rects(k);
+            if rs.is_empty() {
+                let why = if TAPPS.with_borrow(|t| t.iter().any(|t| !t.hidden)) { t!("Все значки на панели", "Every icon is on the bar", ja: "すべてバーに表示中", pt: "Todos os ícones estão na barra", zh: "图标都在任务栏上") } else { t!("Здесь пока пусто", "Nothing here yet", ja: "まだ何もありません", pt: "Nada em segundo plano", zh: "这里还什么都没有") };
+                text(dc, why, r(0, 0, w, h), mix(pal().bg, pal().dim, rise(0)), DT_CENTER);
             }
-            let kept = bar_idx();
-            for (rc, a) in rects(k) {
+            let first = rs.first().map_or(0, |x| if let Act::Tray(i) = x.1 { i } else { 0 });
+            for &(rc, a) in &rs {
                 let Act::Tray(i) = a else { continue };
-                let Some((id, exe, tip, key, ic)) = tray_item(i) else { continue };
-                let row = (i - SCROLL.get()) as i32;
-                let t = rise(1 + row);
-                let seen = |c: u32| mix(pal().bg, c, t);
-                let d = ((1.0 - t) * sc(14) as f32) as i32;
-                let rc = RECT { top: rc.top + d, bottom: rc.bottom + d, ..rc };
-                let on = hot(a) || hot(Act::TrayPin(i)) || hot(Act::TrayEnd(i));
-                let pinned = list.get(i).is_some_and(|x| kept.contains(x));
-                let key_h = 1_720_000 + row * 10;
-                let (th, p) = (hv(key_h, on), press_t(key_h));
-                let base = mix(pal().bg, pal().text, 0.08 * th + 0.06 * p);
-                fill(dc, inset(rc, (p * sc(2) as f32) as i32), seen(base), nested(k, 8, 20));
-                let cy = (rc.top + rc.bottom) / 2;
+                let Some((.., ic)) = tray_item(i) else { continue };
+                let t = rise((i - first) as i32 / 2);
+                let key_h = 1_720_000 + (i - first) as i32;
+                let (th, p) = (hv(key_h, hot(a)), press_t(key_h));
+                let held = matches!(GRAB.get(), Some((x, _, _, true)) if x == a);
+                let c = drop_by(inset(rc, sc(2)), t);
+                if th > 0.01 || p > 0.01 || held {
+                    fill(dc, c, mix(pal().bg, pal().text, (0.10 * th + 0.06 * p) * t), nested(k, TPAD + 2, 12));
+                }
                 if !ic.is_null() {
-                    // pops in, swells under the pointer
-                    let size = sc(22) as f32 * (0.5 + 0.5 * t) * (1.0 - 0.08 * p);
-                    fly_icon(dc, ic, (rc.left + sc(26)) as f32, cy as f32, size);
+                    fly_icon(dc, ic, (c.left + c.right) as f32 / 2.0, (c.top + c.bottom) as f32 / 2.0, sc(20) as f32 * (0.6 + 0.4 * t) * (1.0 - 0.1 * p) * if held { 0.75 } else { 1.0 });
                 }
-                let armed = CONFIRM.get() == 100 + i as i32;
-                let name = app_name(&exe, id.0);
-                let line = tip.lines().next().unwrap_or("").trim().to_string();
-                let sub = if armed { t!("Нажмите ещё раз, чтобы завершить", "Click again to end it", ja: "もう一度クリックで終了", pt: "Clique de novo para encerrar", zh: "再次点击以结束").to_string() } else if line.eq_ignore_ascii_case(&name) { String::new() } else { line };
-                let left = rc.left + sc(50) + (th * sc(2) as f32) as i32;
-                let right = rc.right - if on || pinned { sc(80) } else { sc(14) };
-                SelectObject(dc, f_semi);
-                if sub.is_empty() {
-                    text(dc, &name, RECT { left, right, ..rc }, seen(pal().text), DT_LEFT);
-                } else {
-                    text(dc, &name, RECT { left, right, top: cy - sc(19), bottom: cy + sc(1) }, seen(pal().text), DT_LEFT);
-                    SelectObject(dc, f_small);
-                    text(dc, &sub, RECT { left, right, top: cy, bottom: cy + sc(18) }, seen(if armed { BAD } else { pal().dim }), DT_LEFT);
-                }
-                // the row's buttons: pin (stays lit while the icon is on the bar), end
-                SelectObject(dc, f_glyph);
-                for (act, glyph, shown) in [(Act::TrayPin(i), "\u{E718}", th.max(if pinned { 1.0 } else { 0.0 })), (Act::TrayEnd(i), "\u{E711}", if key == "explorer.exe" { 0.0 } else { th })] {
-                    let Some(&(b, _)) = rects(k).iter().find(|(_, x)| *x == act) else { continue };
-                    let b = RECT { top: b.top + d, bottom: b.bottom + d, ..b };
-                    let hb = hv(key_h + if glyph == "\u{E718}" { 1 } else { 2 }, hot(act));
-                    if shown * hb > 0.01 {
-                        fill(dc, b, seen(mix(base, if glyph == "\u{E711}" { BAD } else { pal().text }, 0.16 * hb * shown)), sc(30));
-                    }
-                    let c = if glyph == "\u{E711}" { mix(pal().dim, BAD, hb) } else if pinned { pal().accent } else { mix(pal().dim, pal().text, hb) };
-                    if shown > 0.01 {
-                        sym_t(dc, glyph, b, seen(mix(base, c, shown)), hb, 0.0);
-                    }
-                }
+            }
+            let (n, cols) = (tray_list().len(), tray_cols(tray_list().len()));
+            let lines = n.div_ceil(cols);
+            if lines > TROWS {
+                // where the grid is, when it does not fit
+                let (a, b) = (sc(TPAD), sc(h - TPAD));
+                let len = (b - a) * TROWS as i32 / lines as i32;
+                let y = a + (b - a - len) * SCROLL.get().min(lines - TROWS) as i32 / (lines - TROWS) as i32;
+                fill(dc, RECT { left: sc(w - 5), right: sc(w - 2), top: y, bottom: y + len }, mix(pal().bg, pal().text, 0.25), sc(3));
             }
         }
         Kind::Menu => {
@@ -2181,7 +2288,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
                 }
             });
         }
-        Kind::Start if line_icons() => start::paint(dc, &start::Fonts { txt: f_txt, small: f_small, glyph: f_glyph, semi: f_semi }, over),
+        Kind::Start if line_icons() => start::paint(dc, &start::Fonts { txt: f_txt, small: f_small, glyph: f_glyph, semi: f_semi, mark: f_gs }, over),
         Kind::Start => {
             surface(dc, r(20, 20, w - 20, 56), card, sc(36));
             SelectObject(dc, f_glyph);
@@ -2338,6 +2445,29 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_DROPFILES => on_files(hw, wp as HDROP),
         WM_TIMER if wp == 7 => tray_watch(hw),
+        WM_TIMER if wp == 8 => {
+            KillTimer(hw, 8);
+            if let (Some(Act::Tray(i)), None) = (OVER.get(), GRAB.get())
+                && let Some(&(rc, _)) = rects(k).iter().find(|x| x.1 == Act::Tray(i))
+            {
+                let mut p = POINT { x: (rc.left + rc.right) / 2, y: rc.top };
+                ClientToScreen(hw, &mut p);
+                show_tip_at(tray_tip(i), p.x, Some(p.y));
+            }
+        }
+        WM_MOUSELEAVE => {
+            hide_tip(null_mut());
+            KillTimer(hw, 8);
+            if OVER.replace(None).is_some() {
+                InvalidateRect(hw, null(), 0);
+            }
+        }
+        // the drag is taken away from us (Alt+Tab, a lock screen): everything stays as it was
+        WM_CAPTURECHANGED if GRAB.get().is_some() => {
+            GRAB.set(None);
+            start::drop_drag(false);
+            InvalidateRect(hw, null(), 0);
+        }
         WM_TIMER if wp == 9 => {
             KillTimer(hw, 9);
             if k == Kind::Quick {
@@ -2352,16 +2482,10 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             if k == Kind::Tray || k == Kind::Wifi && PASS.with_borrow(|p| p.is_none()) {
                 if k == Kind::Wifi {
                     read_nets();
+                } else {
+                    tray_prune();
                 }
-                let (w, h) = (sc(size(k).0), sc(size(k).1));
-                // the panel hangs above the bar: keep its bottom edge where it is and grow / shrink upward
-                let (x, _) = FIN.get();
-                let y = pop_y(h);
-                FIN.set((x, y));
-                SetWindowPos(hw, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-                if !line_icons() {
-                    round_window(hw, w, h, 16);
-                }
+                fit(hw, k);
             }
             InvalidateRect(hw, null(), 0);
         }
@@ -2372,9 +2496,28 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     slide(a, x, rc);
                 }
             }
+            let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hw, dwHoverTime: 0 };
+            TrackMouseEvent(&mut tme);
+            if let Some((a, x0, y0, moved)) = GRAB.get() {
+                if !moved && ((x - x0).abs() > sc(6) || (y - y0).abs() > sc(6)) {
+                    GRAB.set(Some((a, x0, y0, true)));
+                }
+                if matches!(GRAB.get(), Some((.., true))) {
+                    match a {
+                        Act::Hit(i) => start::drag(i, x, y),
+                        Act::Tray(_) => _ = SetCursor(LoadCursorW(null_mut(), IDC_HAND)), // to the bar: it stays there
+                        _ => {}
+                    }
+                    InvalidateRect(hw, null(), 0);
+                }
+            }
             let o = act_at(k, x, y).map(|a| a.1);
-            if k == Kind::Tray && !matches!(o, Some(Act::TrayEnd(_))) {
-                CONFIRM.set(-1);
+            if k == Kind::Tray && OVER.get() != o {
+                hide_tip(null_mut());
+                KillTimer(hw, 8);
+                if o.is_some() {
+                    SetTimer(hw, 8, 350, None);
+                }
             }
             if OVER.replace(o) != o || DRAG.get() != 0 {
                 InvalidateRect(hw, null(), 0);
@@ -2387,14 +2530,24 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             } else if CTX.with_borrow(|c| c.is_some()) && !matches!(hit, Some((_, Act::Ctx(_)))) {
                 CTX.set(None); // a click beside the open menu only closes it
             } else if let Some((rc, a)) = hit {
-                if let Act::Tray(i) = a {
-                    press(1_720_000 + (i - SCROLL.get()) as i32 * 10);
+                if let Act::Tray(_) | Act::Hit(_) = a {
+                    // both act when the button comes up: until then it may become a drag
+                    press(match a {
+                        Act::Hit(i) => start::cell_key(i),
+                        _ => 1_720_000 + rects(k).iter().position(|x| x.1 == a).unwrap_or(0) as i32,
+                    });
+                    hide_tip(null_mut());
+                    KillTimer(hw, 8);
+                    GRAB.set(Some((a, x, y, false)));
+                    SetCapture(hw);
+                    InvalidateRect(hw, null(), 0);
+                    return 0;
                 }
                 if matches!(a, Act::CalPrev | Act::CalNext | Act::CalToday) {
                     press(1_730_000 + rc.left);
                 }
                 if matches!(a, Act::Explorer | Act::PowerMenu | Act::Settings(_)) {
-                    press(1_800_010 + rc.left);
+                    press(start::button_key(a));
                 }
                 if let Act::Tile(i) = a {
                     press(TILE_KEY + i as i32);
@@ -2408,7 +2561,18 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_RBUTTONUP => {
             match (k, act_at(k, x, y)) {
-                (Kind::Tray, Some((_, Act::Tray(i) | Act::TrayPin(i) | Act::TrayEnd(i)))) => tray_do(i, false),
+                _ if GRAB.get().is_some() => {} // in the middle of a drag
+                (Kind::Tray, Some((_, Act::Tray(i)))) => {
+                    hide_tip(null_mut());
+                    KillTimer(hw, 8);
+                    tray_do(i, false)
+                }
+                (Kind::Tray, None) => {
+                    let mut p: POINT = zeroed();
+                    GetCursorPos(&mut p);
+                    tray_menu(if vert() { p.y } else { p.x });
+                    return 0;
+                }
                 (Kind::Start, Some((_, Act::Hit(i)))) => start::menu(hw, i, x, y),
                 (Kind::Start, Some((_, Act::App(i)))) => app_menu(hw, i, x, y),
                 (Kind::Wifi, Some((_, Act::Net(_) | Act::NetOff))) if PASS.with_borrow(|p| p.is_none()) => {
@@ -2425,8 +2589,32 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             InvalidateRect(hw, null(), 0);
         }
         WM_LBUTTONUP => {
-            if let (Kind::Tray, Some((_, Act::Tray(i)))) = (k, act_at(k, x, y)) {
-                tray_do(i, true); // on the way up: what the app opens must not be dismissed by the release
+            if let Some((a, _, _, moved)) = GRAB.take() {
+                ReleaseCapture();
+                let here = act_at(k, x, y).is_some_and(|h| h.1 == a);
+                match a {
+                    Act::Hit(_) if moved && start::drop_drag(true) => {}
+                    Act::Hit(_) | Act::Tray(_) if here => match a {
+                        Act::Tray(i) => tray_do(i, true), // on the way up: what the app opens must not be dismissed by the release
+                        _ => run_act(a, zeroed(), x),
+                    },
+                    Act::Tray(i) if moved => {
+                        let mut p: POINT = zeroed();
+                        GetCursorPos(&mut p);
+                        if WindowFromPoint(p) == BAR.load(Relaxed) as HWND && BAR.load(Relaxed) != 0 {
+                            if let Some((_, _, _, key, _)) = tray_item(i) {
+                                toggle_shown(&key);
+                                InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
+                                tray_changed();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if FLY.get().is_some() && hw == FH.get() {
+                    look_again(hw, k);
+                    InvalidateRect(hw, null(), 0);
+                }
                 return 0;
             }
             let d = DRAG.replace(0);
@@ -2441,13 +2629,35 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             let up = (wp >> 16) as i16 > 0;
             match k {
                 Kind::Quick => add_volume(if up { 2 } else { -2 }),
-                Kind::Tray => SCROLL.set(if up { SCROLL.get().saturating_sub(1) } else { (SCROLL.get() + 1).min(tray_list().len().saturating_sub(TROWS)) }),
+                _ if GRAB.get().is_some() => {}
+                Kind::Tray => {
+                    let n = tray_list().len();
+                    SCROLL.set(if up { SCROLL.get().saturating_sub(1) } else { (SCROLL.get() + 1).min(n.div_ceil(tray_cols(n)).saturating_sub(TROWS)) })
+                }
                 Kind::Start if line_icons() => start::scroll(up),
                 Kind::Cal if line_icons() => run_act(if up { Act::CalPrev } else { Act::CalNext }, zeroed(), 0),
                 Kind::Start => SCROLL.set(if up { SCROLL.get().saturating_sub(2) } else { (SCROLL.get() + 2).min(filtered().len().saturating_sub(ROWS)) }),
                 _ => {}
             }
+            look_again(hw, k);
             InvalidateRect(hw, null(), 0);
+        }
+        WM_KEYDOWN if k == Kind::Tray && matches!(wp as u16, VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT) => {
+            let n = tray_list().len();
+            let cols = tray_cols(n);
+            if n > 0 {
+                let i = match (OVER.get(), wp as u16) {
+                    (Some(Act::Tray(i)), VK_RIGHT) => (i + 1).min(n - 1),
+                    (Some(Act::Tray(i)), VK_LEFT) => i.saturating_sub(1),
+                    (Some(Act::Tray(i)), VK_DOWN) => (i + cols).min(n - 1),
+                    (Some(Act::Tray(i)), _) => i.saturating_sub(cols),
+                    _ => 0,
+                };
+                SCROLL.set(SCROLL.get().min(i / cols).max((i / cols + 1).saturating_sub(TROWS)));
+                OVER.set(Some(Act::Tray(i)));
+                SetTimer(hw, 8, 350, None);
+                InvalidateRect(hw, null(), 0);
+            }
         }
         WM_KEYDOWN if k == Kind::Start && line_icons() && matches!(wp as u16, VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT) => {
             if start::searching() || SEL_SHOWN.replace(true) {
@@ -2478,6 +2688,8 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     QUERY.set(String::new()); // Esc clears the search first, the next one closes
                     SCROLL.set(0);
                     SEL.set(0);
+                } else if k == Kind::Start && start::end_choosing() {
+                    // then the choosing
                 } else {
                     close();
                     return 0;
@@ -2495,9 +2707,11 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         p.push(ch);
                     }
                 }
+            } else if let (Kind::Tray, 13, Some(Act::Tray(i))) = (k, c, OVER.get()) {
+                tray_do(i, true);
             } else if k == Kind::Start {
                 if c == 13 {
-                    if if line_icons() { start::run(SEL.get()) } else { launch(SEL.get()) } {
+                    if if line_icons() { (start::searching() || SEL_SHOWN.get()) && start::run(SEL.get()) } else { launch(SEL.get()) } {
                         close();
                         return 0;
                     }
@@ -2529,12 +2743,34 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         _ => return DefWindowProcW(hw, msg, wp, lp),
     }
+    if k == Kind::Start && matches!(msg, WM_CHAR | WM_KEYDOWN | WM_LBUTTONDOWN | WM_RBUTTONUP) && hw == FH.get() {
+        look_again(hw, k);
+    }
     0
 }
 
 #[cfg(test)]
 mod delphos {
     use super::*;
+
+    fn tapps(n: usize) -> Vec<TIcon> {
+        (0..n).map(|i| TIcon { hwnd: (i + 1) as HWND, uid: 0, guid: [0; 16], icon: null_mut(), cb: 0, ver: 0, hidden: false, tip: String::new(), key: format!("k{i}") }).collect()
+    }
+
+    /// Dragging: the app takes the place it is dropped on, the ones between move over, and nothing is lost.
+    #[test]
+    fn pins_change_places() {
+        let go = |a: &str, b: &str| {
+            *PINNED.lock().unwrap() = ["A", "B", "C", "D"].map(String::from).to_vec();
+            start::move_pin(a, b);
+            PINNED.lock().unwrap().concat()
+        };
+        assert_eq!(go("A", "C"), "BCAD");
+        assert_eq!(go("d", "a"), "DABC");
+        assert_eq!(go("B", "B"), "ABCD");
+        assert_eq!(go("X", "B"), "ABCD");
+        PINNED.lock().unwrap().clear();
+    }
 
     /// Run with WINRUST_STYLE=delphos: every button of every panel is inside it, big enough, and answers at its own centre.
     #[test]
@@ -2545,7 +2781,7 @@ mod delphos {
         let net = |ssid: &str, connected: bool| Net { ssid: ssid.into(), q: 80, secure: true, profile: None, connected, auth: 7, g: windows_sys::core::GUID::from_u128(0) };
         NETS.set(vec![net("a", true), net("b", false), net("c", false)]);
         MITEMS.set(vec![MItem::head("h"), MItem::new("x"), MItem::new("y").sep(), MItem::new("z").danger()]);
-        TAPPS.set((0..5).map(|i| TIcon { hwnd: (i + 1) as HWND, uid: 0, guid: [0; 16], icon: null_mut(), cb: 0, ver: 0, hidden: false, tip: String::new(), key: format!("k{i}") }).collect());
+        TAPPS.set(tapps(5));
         *APPS.lock().unwrap() = (0..40).map(|i| (format!("App {i}"), wide(&format!(r"C:\a{i}.lnk")))).collect();
         let check = |k: Kind, what: &str| {
             let (w, h) = (sc(size(k).0), sc(size(k).1));
@@ -2567,20 +2803,48 @@ mod delphos {
             check(Kind::Wifi, "wifi");
             check(Kind::Menu, "menu");
             check(Kind::Tray, "tray");
+            for n in 1..60 {
+                TAPPS.set(tapps(n));
+                assert!(rects(Kind::Tray).len() >= n.min(18), "{n} background apps");
+                for s in [0, 99] {
+                    SCROLL.set(s);
+                    check(Kind::Tray, "tray");
+                }
+                SCROLL.set(0);
+            }
+            TAPPS.set(tapps(5));
             CAL.set(this_month());
             check(Kind::Cal, "calendar");
             CAL.set((2020, 2));
             check(Kind::Cal, "calendar, another month");
             QUERY.set(String::new());
             check(Kind::Start, "start");
+            start::begin_choosing();
+            check(Kind::Start, "start, choosing");
+            start::end_choosing();
             start::ALL.set(true);
             SCROLL.set(2);
             check(Kind::Start, "start, all apps");
             SCROLL.set(0);
             QUERY.set("app".into());
             check(Kind::Start, "start, results");
-            // the power menu lies over the list: it wins there
+            // each cell in sight has an animation key of its own (a shared one lights two cells up at once)
+            for (all, scroll, q) in [(false, 0, ""), (true, 0, ""), (true, 2, ""), (false, 0, "app"), (false, 3, "app")] {
+                start::ALL.set(all);
+                SCROLL.set(scroll);
+                QUERY.set(q.into());
+                let rs = rects(Kind::Start);
+                let keys: Vec<i32> = rs.iter().filter_map(|x| match x.1 { Act::Hit(i) => Some(start::cell_key(i)), Act::Explorer | Act::Settings(_) | Act::PowerMenu => Some(start::button_key(x.1)), _ => None }).collect();
+                let unique: std::collections::HashSet<_> = keys.iter().collect();
+                assert_eq!(unique.len(), keys.len(), "all {all}, scroll {scroll}, {q}");
+            }
+            start::ALL.set(false);
+            SCROLL.set(0);
+            // the power menu lies over the list: it wins there, and nothing under it answers
             start::PMENU.set(1);
+            for (x, y) in (0..sc(size(Kind::Start).0)).step_by(5).flat_map(|x| (0..sc(size(Kind::Start).1)).step_by(5).map(move |y| (x, y))).filter(|p| start::on_power(p.0, p.1)) {
+                assert!(matches!(act_at(Kind::Start, x, y), None | Some((_, Act::Power(_)))));
+            }
             for (b, a) in rects(Kind::Start).into_iter().filter(|(_, a)| matches!(a, Act::Power(_))) {
                 assert_eq!(act_at(Kind::Start, (b.left + b.right) / 2, (b.top + b.bottom) / 2).map(|x| x.1), Some(a));
             }
@@ -2608,17 +2872,6 @@ mod delphos {
         assert_eq!(CAL.get(), (2026, 12));
         unsafe { run_act(Act::CalToday, zeroed(), 0) };
         assert_eq!(CAL.get(), this_month());
-    }
-
-    /// Ending a background app takes two clicks, and the first does nothing else.
-    #[test]
-    fn ending_an_app_takes_two_clicks() {
-        TAPPS.set(vec![TIcon { hwnd: 1 as HWND, uid: 0, guid: [0; 16], icon: null_mut(), cb: 0, ver: 0, hidden: false, tip: String::new(), key: "x.exe".into() }]);
-        CONFIRM.set(-1);
-        unsafe { run_act(Act::TrayEnd(0), zeroed(), 0) };
-        assert_eq!((CONFIRM.get(), TAPPS.with_borrow(|t| t.len())), (100, 1));
-        unsafe { run_act(Act::TrayEnd(0), zeroed(), 0) };
-        assert_eq!(CONFIRM.get(), -1);
     }
 }
 

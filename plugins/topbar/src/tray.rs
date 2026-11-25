@@ -94,7 +94,11 @@ pub(crate) unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wp: WPARAM,
     if msg == WM_COPYDATA {
         let c = &*(lp as *const Cds);
         if c.dw == 1 && c.cb >= 964 {
+            let was = tray_list();
             tray_msg(std::slice::from_raw_parts(c.p, c.cb as usize));
+            if tray_list() != was {
+                fly::tray_changed();
+            }
             return 1;
         }
         // SHAppBarMessage (our own bar's work-area reservation, ABM_SETSTATE...) also goes to "Shell_TrayWnd": hand it to explorer's
@@ -165,11 +169,26 @@ pub(crate) fn over_idx() -> Vec<usize> {
     TAPPS.with_borrow(|t| (0..t.len()).filter(|i| !t[*i].hidden && !bar.contains(i)).collect())
 }
 
-/// Every tray icon, for the Delphos panel: the ones only it shows, then the ones kept on the bar.
+/// The tray icons of the Delphos panel.
 pub(crate) fn tray_list() -> Vec<usize> {
-    let mut v = over_idx();
-    v.extend(bar_idx());
-    v
+    over_idx()
+}
+
+/// Drops the icons of apps that ended without taking them along.
+pub(crate) unsafe fn tray_prune() {
+    let dead = TAPPS.with_borrow_mut(|t| {
+        let n = t.len();
+        t.retain(|x| IsWindow(x.hwnd) != 0 || {
+            forget_icon(x.icon);
+            DestroyIcon(x.icon);
+            false
+        });
+        t.len() != n
+    });
+    if dead {
+        fly::tray_changed();
+        InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
+    }
 }
 
 thread_local! {

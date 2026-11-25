@@ -1,7 +1,7 @@
 //! topbar: line icons of the Delphos style, drawn on a 24x24 grid with one thin round-ended stroke (shares main.rs through `super::*`).
 use super::*;
 use windows_sys::Win32::Graphics::GdiPlus::{
-    GdipCreateBitmapFromScan0, GdipCreateLineBrush, GdipDisposeImage, GdipDrawEllipse, GdipDrawImageRect, GdipDrawPath, GdipSetInterpolationMode, GdipSetPenLineJoin, GpBitmap, GpImage, GpLineGradient, InterpolationModeHighQualityBicubic,
+    GdipCreateBitmapFromScan0, GdipCreateLineBrush, GdipDisposeImage, GdipDrawEllipse, GdipDrawImageRect, GdipDrawPath, GdipFillPolygon, GdipSetInterpolationMode, GdipSetPenLineJoin, GpBitmap, GpImage, GpLineGradient, InterpolationModeHighQualityBicubic,
     LineJoinRound, PointF, WrapModeTileFlipXY,
 };
 
@@ -161,6 +161,16 @@ impl Ink {
         GdipCreateSolidFill(self.argb, &mut b);
         GdipFillEllipse(self.g, b as *mut GpBrush, self.x + (cx - r) * self.k, self.y + (cy - r) * self.k, 2.0 * r * self.k, 2.0 * r * self.k);
         GdipDeleteBrush(b as *mut GpBrush);
+    }
+    /// A filled shape; the pen rounds its corners.
+    unsafe fn poly(&self, pts: &[(f32, f32)]) {
+        let v: Vec<PointF> = pts.iter().map(|p| PointF { X: self.x + p.0 * self.k, Y: self.y + p.1 * self.k }).collect();
+        let mut b: *mut GpSolidFill = null_mut();
+        GdipCreateSolidFill(self.argb, &mut b);
+        GdipFillPolygon(self.g, b as *mut GpBrush, v.as_ptr(), v.len() as i32, FillModeAlternate);
+        GdipDeleteBrush(b as *mut GpBrush);
+        self.line(pts);
+        self.line(&[pts[pts.len() - 1], pts[0]]);
     }
     unsafe fn arc(&self, cx: f32, cy: f32, r: f32, from: f32, sweep: f32) {
         GdipDrawArc(self.g, self.p, self.x + (cx - r) * self.k, self.y + (cy - r) * self.k, 2.0 * r * self.k, 2.0 * r * self.k, from, sweep);
@@ -374,6 +384,20 @@ unsafe fn shape(i: &Ink, s: &str) -> bool {
         "\u{E76C}" => i.line(&[(9.0, 5.5), (15.5, 12.0), (9.0, 18.5)]),  // chevron right
         "\u{E70E}" => i.line(&[(5.5, 15.0), (12.0, 8.5), (18.5, 15.0)]), // chevron up
         "\u{E70D}" => i.line(&[(5.5, 9.0), (12.0, 15.5), (18.5, 9.0)]),  // chevron down
+        // previous, next track, play, pause
+        "\u{E892}" => {
+            i.poly(&[(19.0, 5.5), (19.0, 18.5), (8.5, 12.0)]);
+            i.line(&[(5.5, 5.5), (5.5, 18.5)]);
+        }
+        "\u{E893}" => {
+            i.poly(&[(5.0, 5.5), (5.0, 18.5), (15.5, 12.0)]);
+            i.line(&[(18.5, 5.5), (18.5, 18.5)]);
+        }
+        "\u{E768}" => i.poly(&[(7.0, 4.5), (7.0, 19.5), (19.5, 12.0)]),
+        "\u{E769}" => {
+            i.rect(6.0, 5.0, 4.0, 14.0, 1.2, true);
+            i.rect(14.0, 5.0, 4.0, 14.0, 1.2, true);
+        }
         "\u{E73E}" => i.line(&[(5.0, 12.5), (10.0, 17.5), (19.0, 7.0)]), // check mark
         _ => return false,
     }

@@ -50,13 +50,41 @@ thread_local! {
     static WLAN: Cell<usize> = const { Cell::new(0) }; // WLAN client handle, opened once (opening it talks to wlansvc every time)
 }
 
+unsafe extern "system" fn wlan_event(d: *mut L2_NOTIFICATION_DATA, _: *mut std::ffi::c_void) {
+    // 9 connection start, 10 complete, 11 failed, 20 disconnecting, 21 disconnected; not the scans
+    if !d.is_null() && matches!((*d).NotificationCode, 9..=11 | 20 | 21) {
+        net_changed();
+    }
+}
+
+unsafe extern "system" fn hint_event(_: *const std::ffi::c_void, _: windows_sys::Win32::Networking::WinSock::NL_NETWORK_CONNECTIVITY_HINT) {
+    net_changed();
+}
+
+/// Any thread: the bar looks at the network again.
+unsafe fn net_changed() {
+    let bar = BAR.load(Relaxed) as HWND;
+    if !bar.is_null() {
+        PostMessageW(bar, NET_CHANGED, 0, 0);
+    }
+}
+
+/// Windows tells us when the internet comes and goes (the poll alone would notice up to 3 s late).
+pub(crate) unsafe fn watch_net() {
+    let mut h: HANDLE = null_mut();
+    windows_sys::Win32::NetworkManagement::IpHelper::NotifyNetworkConnectivityHintChange(Some(hint_event), null(), false, &mut h);
+}
+
 pub(crate) unsafe fn read_wifi() {
     let mut h: HANDLE = WLAN.get() as HANDLE;
-    let mut q = -1;
+    let (mut q, mut joining, mut ssid) = (-1, false, String::new());
     if h.is_null() {
         let mut ver = 0u32;
         if WlanOpenHandle(2, null(), &mut ver, &mut h) != 0 {
             h = null_mut();
+        } else {
+            // 8 = ACM notifications: connecting, connected, disconnected
+            WlanRegisterNotification(h, 8, 1, Some(wlan_event), null(), null(), null_mut());
         }
         WLAN.set(h as usize);
     }
@@ -70,8 +98,11 @@ pub(crate) unsafe fn read_wifi() {
             for i in 0..l.dwNumberOfItems as usize {
                 let ifc = &*l.InterfaceInfo.as_ptr().add(i);
                 let (mut size, mut data) = (0u32, null_mut());
+                joining |= ifc.isState == wlan_interface_state_associating || ifc.isState == wlan_interface_state_authenticating;
                 if ifc.isState == wlan_interface_state_connected && WlanQueryInterface(h, &ifc.InterfaceGuid, wlan_intf_opcode_current_connection, null(), &mut size, &mut data, null_mut()) == 0 {
-                    q = (*(data as *const WLAN_CONNECTION_ATTRIBUTES)).wlanAssociationAttributes.wlanSignalQuality as i32;
+                    let a = &(*(data as *const WLAN_CONNECTION_ATTRIBUTES)).wlanAssociationAttributes;
+                    q = a.wlanSignalQuality as i32;
+                    ssid = String::from_utf8_lossy(&a.dot11Ssid.ucSSID[..(a.dot11Ssid.uSSIDLength as usize).min(32)]).into_owned();
                     WlanFreeMemory(data);
                 }
             }
@@ -79,6 +110,8 @@ pub(crate) unsafe fn read_wifi() {
         }
     }
     WIFI.set(q);
+    JOINING.set(joining);
+    SSID.set(ssid);
     // Windows' own verdict (the same one its tray icon shows): a connection without internet is not "online"
     use windows_sys::Win32::{NetworkManagement::IpHelper::GetNetworkConnectivityHint, Networking::WinSock::{NL_NETWORK_CONNECTIVITY_HINT, NetworkConnectivityLevelHintConstrainedInternetAccess, NetworkConnectivityLevelHintInternetAccess}};
     let mut hint: NL_NETWORK_CONNECTIVITY_HINT = zeroed();
@@ -95,6 +128,7 @@ pub(crate) enum Link {
     Wifi(i32),      // on wifi with internet, signal 0..100
     NoInternet(i32), // on wifi, but no way out
     Cable,          // internet over ethernet
+    Joining,        // not connected yet: a wifi network is being joined
     Offline,        // no connection at all
 }
 
@@ -103,6 +137,7 @@ pub(crate) fn net() -> Link {
         (q, true) if q >= 0 => Link::Wifi(q),
         (q, false) if q >= 0 => Link::NoInternet(q),
         (_, true) => Link::Cable,
+        _ if JOINING.get() => Link::Joining,
         _ => Link::Offline,
     }
 }
@@ -141,6 +176,19 @@ pub(crate) unsafe fn wifi_glyph(dc: HDC, cx: i32, cy: i32, s: i32, lit: i32, on:
     GdipFillEllipse(g, br as *mut GpBrush, bx - w * 0.9, by - w * 0.9, w * 1.8, w * 1.8);
     GdipDeleteBrush(br as *mut GpBrush);
     // the mark sits at the lower right, on a cut-out of the background so it stays readable over the arcs
+    if mark > 0 && line_icons() {
+        // thin strokes like the other icons: a slash across, or an exclamation mark in the free corner under the arcs
+        let p = pen(if mark == 1 { BAD } else { WARN }, w * 1.1);
+        if mark == 1 {
+            GdipDrawLine(g, p, bx - sf * 0.52, by - sf * 0.86, bx + sf * 0.52, by + sf * 0.1);
+        } else {
+            GdipDrawLine(g, p, bx + sf * 0.62, by - sf * 0.46, bx + sf * 0.62, by - sf * 0.18);
+            GdipDrawLine(g, p, bx + sf * 0.62, by + sf * 0.02, bx + sf * 0.62, by + sf * 0.04);
+        }
+        GdipDeletePen(p);
+        GdipDeleteGraphics(g);
+        return;
+    }
     let (mx, my, mr) = (bx + sf * 0.42, by - sf * 0.08, sf * 0.26);
     if mark > 0 {
         let mut bg: *mut GpSolidFill = null_mut();
@@ -193,6 +241,10 @@ pub(crate) unsafe fn net_icon(dc: HDC, cx: i32, cy: i32, s: i32, f_glyph: HFONT)
     match net() {
         Link::Wifi(q) => wifi_glyph(dc, cx, cy, s, arcs_lit(q), on, off, 0),
         Link::NoInternet(q) => wifi_glyph(dc, cx, cy, s, arcs_lit(q), mix(on, pal().bg, 0.3), off, 2),
+        Link::Joining => {
+            // the arcs fill up until it is through; the bar's timer 9 turns the frames
+            wifi_glyph(dc, cx, cy, s, (now_ms() / 230 % 4) as i32, on, off, 0)
+        }
         Link::Offline => wifi_glyph(dc, cx, cy, s, 0, on, mix(pal().dim, pal().bg, 0.2), 1),
         Link::Cable => {
             SelectObject(dc, f_glyph);

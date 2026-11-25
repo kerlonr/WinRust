@@ -11,6 +11,8 @@ pub(crate) const CARD_W: i32 = 220;
 pub(crate) const CARD_H: i32 = 160;
 pub(crate) const GAP: i32 = 10;
 const TITLE: i32 = 28;
+const STRIP: i32 = 36; // the media buttons under a preview
+const ROOM: i32 = 140; // a narrower card has no room for them
 
 /// `n` cards of `cw` x `ch` in rows that fit `aw` x `ah`: the rows are balanced, a short last row is centered, and the
 /// cards shrink (down to a third) when there are too many. Returns the card rects from (0,0) and the total width / height.
@@ -48,8 +50,38 @@ pub(crate) fn close_rect(r: &RECT) -> RECT {
 }
 
 /// Where the preview goes inside a card: under the title row.
-fn preview_area(r: &RECT) -> RECT {
-    RECT { left: r.left + sc(8), top: r.top + sc(TITLE), right: r.right - sc(8), bottom: r.bottom - sc(8) }
+fn preview_area(r: &RECT, media: bool) -> RECT {
+    RECT { left: r.left + sc(8), top: r.top + sc(TITLE), right: r.right - sc(8), bottom: r.bottom - sc(if media { STRIP } else { 8 }) }
+}
+
+/// Media button `b` (previous, play / pause, next) in the strip at the foot of a card.
+fn media_rect(r: &RECT, b: usize) -> RECT {
+    let (w, h, gap) = (sc(40), sc(28), sc(6));
+    let x = (r.left + r.right) / 2 - (3 * w + 2 * gap) / 2 + b as i32 * (w + gap);
+    let y = r.bottom - sc(STRIP) + sc(3);
+    RECT { left: x, top: y, right: x + w, bottom: y + h }
+}
+
+/// The media session of window `w`'s app.
+unsafe fn media_of(w: HWND) -> Option<media::Media> {
+    let exe = exe_of(w);
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(w, &mut pid);
+    let pack = if exe.contains(r"\windowsapps\") { aumid_of(pid).unwrap_or_default().to_lowercase() } else { String::new() };
+    media::of(&exe, &[&win_id(w), &pack])
+}
+
+fn media_at(host: HWND, k: usize) -> Option<media::Media> {
+    if host != PVWND.get() { None } else { PV_MEDIA.with_borrow(|m| m.get(k).cloned().flatten()) }
+}
+
+/// Card and media button under (x, y).
+fn media_hit(x: i32, y: i32) -> Option<(usize, usize)> {
+    let k = PV.with_borrow(|p| card_at(&p.1, x, y))?;
+    let r = PV.with_borrow(|p| p.1[k]);
+    let m = media_at(PVWND.get(), k)?;
+    let pt = |c: RECT| x >= c.left && x < c.right && y >= c.top && y < c.bottom;
+    (0..3).find(|&b| m.can[b] && pt(media_rect(&r, b))).map(|b| (k, b))
 }
 
 pub(crate) fn card_at(rects: &[RECT], x: i32, y: i32) -> Option<usize> {
@@ -75,14 +107,14 @@ unsafe fn load_card_icon(w: HWND) -> HICON {
 pub(crate) unsafe fn register(host: HWND, wins: &[HWND], rects: &[RECT]) -> Vec<isize> {
     let icons = wins.iter().map(|&w| load_card_icon(w)).collect();
     CARD_ICONS.with_borrow_mut(|all| { all.insert(host as usize, icons); });
-    wins.iter().zip(rects).map(|(&w, r)| {
+    wins.iter().zip(rects).enumerate().map(|(k, (&w, r))| {
         let mut id = 0isize;
         if IsIconic(w) != 0 || DwmRegisterThumbnail(host, w, &mut id) != 0 {
             return 0;
         }
         let mut src = SIZE { cx: 0, cy: 0 };
         DwmQueryThumbnailSourceSize(id, &mut src);
-        let a = preview_area(r);
+        let a = preview_area(r, media_at(host, k).is_some());
         let (aw, ah) = ((a.right - a.left) as f32, (a.bottom - a.top) as f32);
         let k = if src.cx > 0 && src.cy > 0 { (aw / src.cx as f32).min(ah / src.cy as f32).min(1.0) } else { 1.0 };
         let (dw, dh) = ((src.cx as f32 * k) as i32, (src.cy as f32 * k) as i32);
@@ -168,6 +200,7 @@ pub(crate) unsafe fn paint(host: HWND, wins: &[HWND], rects: &[RECT], ids: &[isi
     let ob = SelectObject(mem, bmp);
     frame(mem, r, pal().line, sc(18));
     let f = CreateFontW(-sc(12), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, wide(ui_face()).as_ptr());
+    let fg = CreateFontW(-sc(14), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, wide(winrust_common::style::icon_face()).as_ptr());
     let of = SelectObject(mem, f);
     SetBkMode(mem, TRANSPARENT as i32);
     if let Some(c) = sel.and_then(|k| rects.get(k)) {
@@ -188,14 +221,29 @@ pub(crate) unsafe fn paint(host: HWND, wins: &[HWND], rects: &[RECT], ids: &[isi
         if on {
             text(mem, "\u{2715}", x, pal().text, DT_CENTER);
         }
+        let media = media_at(host, k);
+        if let Some(m) = &media {
+            let of = SelectObject(mem, fg);
+            let card = if on { pal().active } else { pal().hover };
+            for b in 0..3 {
+                let br = media_rect(c, b);
+                if PV_HOT.get() == Some((k, b)) {
+                    fill(mem, br, mix(card, pal().text, 0.14), sc(10));
+                }
+                let ink = if m.can[b] { pal().text } else { mix(card, pal().dim, 0.5) };
+                sym(mem, ["\u{E892}", if m.playing { "\u{E769}" } else { "\u{E768}" }, "\u{E893}"][b], br, ink);
+            }
+            SelectObject(mem, of);
+        }
         if ids.get(k).is_none_or(|&id| id == 0) {
-            let a = preview_area(c);
+            let a = preview_area(c, media.is_some());
             let s = sc(48).min(a.right - a.left).min(a.bottom - a.top).max(sc(16));
             DrawIconEx(mem, (a.left + a.right - s) / 2, (a.top + a.bottom - s) / 2, ic, s, s, 0, null_mut(), DI_NORMAL);
         }
     }
     SelectObject(mem, of);
     DeleteObject(f);
+    DeleteObject(fg);
     BitBlt(dc, 0, 0, r.right, r.bottom, mem, 0, 0, SRCCOPY);
     SelectObject(mem, ob);
     DeleteObject(bmp);
@@ -209,7 +257,17 @@ thread_local! {
     pub(crate) static PVWND: Cell<HWND> = const { Cell::new(null_mut()) };
     static PV: RefCell<(Vec<HWND>, Vec<RECT>, Vec<isize>, Option<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), None)) };
     static PV_BTN: Cell<i32> = const { Cell::new(NONE) };
+    static PV_MEDIA: RefCell<Vec<Option<media::Media>>> = const { RefCell::new(Vec::new()) }; // the cards' media sessions
+    static PV_HOT: Cell<Option<(usize, usize)>> = const { Cell::new(None) }; // card and media button under the pointer
+    static PV_CX: Cell<i32> = const { Cell::new(0) };
     static PV_AWAY: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Makes the (hidden) window of the previews.
+pub(crate) unsafe fn make(hi: HINSTANCE) {
+    let c = wide("topbar_preview");
+    RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(pv_proc), hInstance: hi, hCursor: LoadCursorW(null_mut(), IDC_ARROW), lpszClassName: c.as_ptr(), ..zeroed() });
+    PVWND.set(CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, c.as_ptr(), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), hi, null()));
 }
 
 /// Shows the windows of app button `btn` as live previews above it. False when it has no windows (the caller shows the tip).
@@ -221,6 +279,7 @@ pub(crate) unsafe fn show_preview(btn: i32, cx: i32) -> bool {
     }
     PV_BTN.set(btn);
     PV_AWAY.set(0);
+    media::refresh();
     layout(pv, wins, cx);
     SetTimer(pv, 1, 150, None); // hides it once the pointer has left both the button and the previews
     true
@@ -229,12 +288,20 @@ pub(crate) unsafe fn show_preview(btn: i32, cx: i32) -> bool {
 unsafe fn layout(pv: HWND, wins: Vec<HWND>, cx: i32) {
     let pad = sc(GAP);
     let (scw, sch) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-    let (mut rects, tw, th) = grid(wins.len(), scw - sc(16) - 2 * pad, sch / 2, sc(CARD_W), sc(CARD_H), sc(GAP));
+    PV_CX.set(cx);
+    PV_HOT.set(None);
+    let mut medias: Vec<_> = wins.iter().map(|&w| media_of(w)).collect();
+    let tall = if medias.iter().any(|m| m.is_some()) { STRIP - 8 } else { 0 };
+    let (mut rects, tw, th) = grid(wins.len(), scw - sc(16) - 2 * pad, sch / 2, sc(CARD_W), sc(CARD_H + tall), sc(GAP));
+    if rects[0].right - rects[0].left < sc(ROOM) {
+        medias.iter_mut().for_each(|m| *m = None);
+    }
     rects.iter_mut().for_each(|r| *r = RECT { left: r.left + pad, top: r.top + pad, right: r.right + pad, bottom: r.bottom + pad });
     let (w, h) = (tw + 2 * pad, th + 2 * pad);
     let old = PV.take();
     let mut ids = old.2;
     unregister(pv, &mut ids);
+    PV_MEDIA.set(medias);
     round_window(pv, w, h, 18);
     let seen = IsWindowVisible(pv) != 0;
     let mut was: RECT = zeroed();
@@ -271,14 +338,29 @@ pub(crate) unsafe extern "system" fn pv_proc(hwnd: HWND, msg: u32, wp: WPARAM, l
         WM_PAINT => PV.with_borrow(|(w, r, ids, sel)| paint(hwnd, w, r, ids, *sel)),
         WM_MOUSEACTIVATE => return MA_NOACTIVATE as isize,
         WM_MOUSEMOVE => {
+            let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+            TrackMouseEvent(&mut tme);
             let k = PV.with_borrow(|p| card_at(&p.1, x, y));
-            if PV.with_borrow_mut(|p| std::mem::replace(&mut p.3, k)) != k {
+            let b = media_hit(x, y);
+            if (PV.with_borrow_mut(|p| std::mem::replace(&mut p.3, k)) != k) | (PV_HOT.replace(b) != b) {
                 InvalidateRect(hwnd, null(), 0);
             }
+        }
+        WM_MOUSELEAVE => {
+            PV_HOT.set(None);
+            PV.with_borrow_mut(|p| p.3 = None);
+            InvalidateRect(hwnd, null(), 0);
         }
         WM_LBUTTONUP | WM_MBUTTONUP => {
             let Some((k, w, r)) = PV.with_borrow(|p| card_at(&p.1, x, y).map(|k| (k, p.0[k], p.1[k]))) else { return 0 };
             let c = close_rect(&r);
+            if let Some(m) = media_at(hwnd, k).filter(|_| msg == WM_LBUTTONUP && y >= r.bottom - sc(STRIP)) {
+                // the strip never switches to the window, a miss between the buttons included
+                if let Some((_, b)) = media_hit(x, y) {
+                    media::press(&m.id, b);
+                }
+                return 0;
+            }
             if msg == WM_MBUTTONUP || (x >= c.left && x < c.right && y >= c.top && y < c.bottom) {
                 PostMessageW(w, WM_CLOSE, 0, 0);
                 let mut rest = PV.with_borrow(|p| p.0.clone());
@@ -301,6 +383,19 @@ pub(crate) unsafe extern "system" fn pv_proc(hwnd: HWND, msg: u32, wp: WPARAM, l
         WM_TIMER if wp == 2 => slide_step(hwnd),
         WM_TIMER if wp == 3 => _ = InvalidateRect(hwnd, null(), 0),
         WM_TIMER if wp == 1 => {
+            media::refresh();
+            let wins = PV.with_borrow(|p| p.0.clone());
+            let now: Vec<_> = wins.iter().map(|&w| media_of(w)).collect();
+            let was = PV_MEDIA.with_borrow(|m| m.clone());
+            let roomy = PV.with_borrow(|p| p.1.first().is_some_and(|r| r.right - r.left >= sc(ROOM)));
+            if now != was && roomy {
+                if now.iter().map(|m| m.is_some()).ne(was.iter().map(|m| m.is_some())) {
+                    layout(hwnd, wins, PV_CX.get()); // the buttons come or go: the cards get another height
+                } else {
+                    PV_MEDIA.set(now);
+                    InvalidateRect(hwnd, null(), 0);
+                }
+            }
             let mut pt = POINT { x: 0, y: 0 };
             GetCursorPos(&mut pt);
             let mut wr: RECT = zeroed();
