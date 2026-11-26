@@ -6,7 +6,7 @@
 use super::*;
 use windows_sys::Win32::Graphics::{
     Dwm::DwmFlush,
-    GdiPlus::{GdipCreateBitmapFromFile, GdipDisposeImage, GdipDrawImageRectI, GdipGetImageHeight, GdipGetImageWidth, GpBitmap, GpImage},
+    GdiPlus::{GdipCreateBitmapFromFile, GdipCreateBitmapFromScan0, GdipDisposeImage, GdipDrawImageRectI, GdipGetImageGraphicsContext, GdipGetImageHeight, GdipGetImageWidth, GpBitmap, GpImage},
 };
 
 /// A blurred picture of what is behind, at screen position (x, y). Pixels are 0x00RRGGBB.
@@ -62,6 +62,22 @@ impl Dib {
         for y in t..b {
             px[(y * w + l) as usize..(y * w + rr.max(l)) as usize].iter_mut().for_each(|p| *p |= 0xFF00_0000);
         }
+    }
+    /// An app icon with its own alpha (GDI would leave it on an opaque square). False: the icon has no smooth copy.
+    pub(crate) unsafe fn icon(&self, ic: HICON, cx: f32, cy: f32, size: f32) -> bool {
+        GdiFlush();
+        let (mut img, mut g): (*mut GpBitmap, *mut GpGraphics) = (null_mut(), null_mut());
+        // 0x000E_200B: PixelFormat32bppPARGB
+        if GdipCreateBitmapFromScan0(self.w, self.h, self.w * 4, 0x000E_200B, self.bits as *const u8, &mut img) != 0 || img.is_null() {
+            return false;
+        }
+        let mut done = false;
+        if GdipGetImageGraphicsContext(img as *mut GpImage, &mut g) == 0 && !g.is_null() {
+            done = smooth_icon(g, ic, cx, cy, size);
+            GdipDeleteGraphics(g);
+        }
+        GdipDisposeImage(img as *mut GpImage);
+        done
     }
     pub(crate) unsafe fn free(self) {
         DeleteDC(self.dc);
@@ -245,6 +261,11 @@ unsafe fn wallpaper(x: i32, y: i32, w: i32, h: i32) -> Option<Backdrop> {
     Some(Backdrop { x, y, w, h, px })
 }
 
+/// The bar's transparency setting as the alpha of its glass: 100 % = solid glass, 30 % (the lowest) = only the wallpaper.
+fn glass_alpha(opacity: u8) -> u32 {
+    (opacity as u32).saturating_sub(30).min(70) * 255 / 70
+}
+
 /// Paints the bar's picture as glass.
 pub(crate) unsafe fn compose_bar(d: &Dib, slab: Slab) {
     let y = GetSystemMetrics(SM_CYSCREEN) - d.h;
@@ -253,12 +274,13 @@ pub(crate) unsafe fn compose_bar(d: &Dib, slab: Slab) {
         let made = wallpaper(0, y, d.w, d.h).map(|b| (key, b));
         BAR_GLASS.set(made);
     }
-    BAR_GLASS.with_borrow(|g| compose(d, g.as_ref().map(|g| &g.1), 0, y, slab));
+    BAR_GLASS.with_borrow(|g| compose(d, g.as_ref().map(|g| &g.1), 0, y, slab, glass_alpha(i18n::style::bar_opacity())));
 }
 
 /// Turns a picture painted on the flat background colour into a glass slab at screen position (x, y): the background becomes
 /// the backdrop, the rest the thinnest layer that still gives its colour. A light rim and sheen on top, smooth round corners.
-pub(crate) unsafe fn compose(d: &Dib, back: Option<&Backdrop>, x: i32, y: i32, slab: Slab) {
+/// `glass` (0..=255): how opaque the backdrop is; what is painted on it stays as it is.
+pub(crate) unsafe fn compose(d: &Dib, back: Option<&Backdrop>, x: i32, y: i32, slab: Slab, glass: u32) {
     let key = swap(pal().bg);
     let (w, h) = (d.w as usize, d.h as usize);
     let (l, t, rr, b) = (slab.r.left as f32, slab.r.top as f32, slab.r.right as f32, slab.r.bottom as f32);
@@ -278,8 +300,8 @@ pub(crate) unsafe fn compose(d: &Dib, back: Option<&Backdrop>, x: i32, y: i32, s
             let base = match line {
                 Some((s, off)) => s[(i as i32 + off).clamp(0, s.len() as i32 - 1) as usize],
                 None => key,
-            };
-            let mut c = over(*p & 0xFF_FFFF, key, lighten(base, sheen));
+            } | 0xFF00_0000;
+            let mut c = laid(layer(*p & 0xFF_FFFF, key), lighten(base, sheen), glass);
             // only the pixels at an edge need the distance to it
             if near_row || fx < l + slab.rad || fx > rr - slab.rad {
                 let (cx, cy) = (fx.clamp(l + slab.rad, rr - slab.rad), fy.clamp(t + slab.rad, b - slab.rad));
@@ -287,13 +309,12 @@ pub(crate) unsafe fn compose(d: &Dib, back: Option<&Backdrop>, x: i32, y: i32, s
                 let dist = if dist >= slab.rad { slab.rad.min(fx - l).min(rr - fx).min(fy - t).min(b - fy) } else { dist };
                 let cover = (dist + 0.5).clamp(0.0, 1.0);
                 let edge = (1.0 - (dist - 0.5).abs()).clamp(0.0, 1.0);
-                c = lighten(c, (rim * edge) as u32);
+                c = lighten(c, scale((rim * edge) as u32, glass));
                 let a = (cover * 255.0) as u32;
-                // never fully clear: the gap around the bar still takes clicks, so the screen's edge stays a target
-                *p = if a == 0 { 0x0100_0000 } else { a << 24 | scale(c >> 16 & 255, a) << 16 | scale(c >> 8 & 255, a) << 8 | scale(c & 255, a) };
-            } else {
-                *p = 0xFF00_0000 | c;
+                c = scale(c >> 24, a) << 24 | scale(c >> 16 & 255, a) << 16 | scale(c >> 8 & 255, a) << 8 | scale(c & 255, a);
             }
+            // never fully clear: the empty parts and the gap around the bar still take clicks, so the screen's edge stays a target
+            *p = if c >> 24 == 0 { 0x0100_0000 } else { c };
         }
     }
 }
@@ -302,23 +323,18 @@ fn scale(v: u32, a: u32) -> u32 {
     (v * a + 127) / 255
 }
 
-/// White at `a` (0..255) over a colour.
+/// White at `a` (0..255) over a colour with premultiplied alpha, which it keeps.
 fn lighten(c: u32, a: u32) -> u32 {
-    if a == 0 {
-        return c;
-    }
+    let top = c >> 24;
     let f = |s: u32| {
         let v = c >> s & 255;
-        (v + scale(255 - v, a)) << s
+        (v + scale(top.saturating_sub(v), a)) << s
     };
-    f(16) | f(8) | f(0)
+    top << 24 | f(16) | f(8) | f(0)
 }
 
-/// `p` was painted on `key`: the same paint laid over `base` instead.
-fn over(p: u32, key: u32, base: u32) -> u32 {
-    if p == key {
-        return base;
-    }
+/// `p` was painted on `key`: the paint alone, premultiplied.
+fn layer(p: u32, key: u32) -> u32 {
     // the smallest opacity that explains the change in every channel
     let mut a = 0u32;
     for s in [16, 8, 0] {
@@ -326,30 +342,55 @@ fn over(p: u32, key: u32, base: u32) -> u32 {
         let need = if v >= k { ((v - k) * 255).div_ceil((255 - k).max(1)) } else { ((k - v) * 255).div_ceil(k.max(1)) };
         a = a.max(need.min(255));
     }
-    let mut out = 0;
+    let mut out = a << 24;
     for s in [16, 8, 0] {
-        let (v, k, b) = (p >> s & 255, key >> s & 255, base >> s & 255);
-        let own = v.saturating_sub(scale(k, 255 - a));
-        out |= (own + scale(b, 255 - a)).min(255) << s;
+        out |= (p >> s & 255).saturating_sub(scale(key >> s & 255, 255 - a)).min(a) << s;
+    }
+    out
+}
+
+/// A premultiplied layer over the colour `base` shown at opacity `glass`, premultiplied.
+fn laid(l: u32, base: u32, glass: u32) -> u32 {
+    let k = scale(glass, 255 - (l >> 24));
+    let a = (l >> 24) + k;
+    let mut out = a << 24;
+    for s in [16, 8, 0] {
+        out |= ((l >> s & 255) + scale(base >> s & 255, k)).min(a) << s;
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{frost, over, swap};
+    use super::{frost, glass_alpha, laid, layer, swap};
 
     #[test]
     fn paint_over_its_own_background_is_unchanged() {
         let key = 0x1B1B1E;
         for p in [0x1B1B1E, 0xFFFFFF, 0x000000, 0x8FD3FF, 0x2A2A2F, 0x101216] {
-            let q = over(p, key, key);
+            let q = laid(layer(p, key), key, 255);
+            assert_eq!(q >> 24, 255);
             for s in [16, 8, 0] {
                 assert!((q >> s & 255).abs_diff(p >> s & 255) <= 2, "{p:06X} -> {q:06X}");
             }
         }
-        assert_eq!(over(key, key, 0x123456), 0x123456); // the background itself is clear glass
-        assert_eq!(over(0xFFFFFF, key, 0x123456), 0xFFFFFF);
+        assert_eq!(laid(layer(key, key), 0x123456, 255), 0xFF12_3456); // the background itself is clear glass
+        assert_eq!(laid(layer(0xFFFFFF, key), 0x123456, 255), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn the_lowest_opacity_leaves_only_the_paint() {
+        let key = 0x1B1B1E;
+        assert_eq!((glass_alpha(100), glass_alpha(30), glass_alpha(0)), (255, 0, 0));
+        assert_eq!(laid(layer(key, key), 0x123456, glass_alpha(30)), 0);
+        assert_eq!(laid(layer(0xFFFFFF, key), 0x123456, glass_alpha(30)), 0xFFFF_FFFF);
+        // premultiplied: no channel above the alpha
+        for p in [0x8FD3FF, 0x2A2A2F, 0x101216, 0x1B1B1F] {
+            for glass in [0, 90, 255] {
+                let q = laid(layer(p, key), 0xF0F0F0, glass);
+                assert!([16, 8, 0].iter().all(|s| q >> s & 255 <= q >> 24), "{p:06X} -> {q:08X}");
+            }
+        }
     }
 
     #[test]

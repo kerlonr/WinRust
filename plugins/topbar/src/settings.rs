@@ -138,7 +138,7 @@ pub(crate) unsafe fn apply_opacity(hwnd: HWND) {
 /// the Windows colour dialog; the last row goes back to the chosen theme's colours.
 pub(crate) unsafe fn colors_page() {
     use windows_sys::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
-    const PCT: [u8; 5] = [100, 85, 70, 55, 40];
+    const PCT: [u8; 6] = [100, 85, 70, 55, 40, 30];
     let colors = [
         t!("Фон", "Background", ja: "背景", pt: "Fundo", zh: "背景"),
         t!("Линии и рамки", "Lines and borders", ja: "線と枠", pt: "Linhas e bordas", zh: "线条与边框"),

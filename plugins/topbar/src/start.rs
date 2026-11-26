@@ -4,14 +4,14 @@ use super::*;
 use std::sync::atomic::AtomicU32;
 
 pub(super) const W: i32 = 600;
-pub(super) const H: i32 = 476;
+pub(super) const H: i32 = TOP + CELL.1 * GRID_ROWS as i32 + 76; // as tall as Windows 11's Start
 const COLS: usize = 6;
-const GRID_ROWS: usize = 3;
+const GRID_ROWS: usize = 5;
 const CELL: (i32, i32) = (92, 96);
 const TOP: i32 = 112; // where the grid starts
 const LIST_TOP: i32 = 76;
 const ROW: i32 = 46;
-const LIST_ROWS: usize = 7;
+const LIST_ROWS: usize = 11;
 const PW: i32 = 208; // the power menu: width and row height
 const PROW: i32 = 40;
 

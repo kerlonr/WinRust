@@ -56,15 +56,25 @@ pub(crate) unsafe fn forget_icon(ic: HICON) {
     }
 }
 
+pub(crate) fn is_smooth(ic: HICON) -> bool {
+    SMOOTH.with_borrow(|m| m.contains_key(&(ic as usize)))
+}
+
+/// Draws the smooth copy of an icon; false if it has none.
+pub(crate) unsafe fn smooth_icon(g: *mut GpGraphics, ic: HICON, cx: f32, cy: f32, size: f32) -> bool {
+    let Some(b) = SMOOTH.with_borrow(|m| m.get(&(ic as usize)).map(|e| e.0)) else { return false };
+    GdipSetInterpolationMode(g, InterpolationModeHighQualityBicubic);
+    GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
+    GdipDrawImageRect(g, b as *mut GpImage, cx - size / 2.0, cy - size / 2.0, size, size) == 0
+}
+
 /// An app icon centered on (cx, cy), `size` px wide.
 pub(crate) unsafe fn app_icon(dc: HDC, ic: HICON, cx: f32, cy: f32, size: f32) {
     let mut g: *mut GpGraphics = null_mut();
-    if let Some(b) = SMOOTH.with_borrow(|m| m.get(&(ic as usize)).map(|e| e.0)) {
-        if GdipCreateFromHDC(dc, &mut g) == 0 && !g.is_null() {
-            GdipSetInterpolationMode(g, InterpolationModeHighQualityBicubic);
-            GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
-            GdipDrawImageRect(g, b as *mut GpImage, cx - size / 2.0, cy - size / 2.0, size, size);
-            GdipDeleteGraphics(g);
+    if is_smooth(ic) && GdipCreateFromHDC(dc, &mut g) == 0 && !g.is_null() {
+        let done = smooth_icon(g, ic, cx, cy, size);
+        GdipDeleteGraphics(g);
+        if done {
             return;
         }
     }

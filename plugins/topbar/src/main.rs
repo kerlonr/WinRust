@@ -32,6 +32,7 @@ mod lang;
 mod settings;
 mod thumbs;
 mod media;
+mod mixer;
 mod order;
 use {icons::*, tray::*, status::*, run::*, shot::*, lang::*, settings::*};
 use windows::{
@@ -285,7 +286,7 @@ thread_local! {
     static JOINING: Cell<bool> = const { Cell::new(false) }; // a wifi adapter is connecting
     static INET: Cell<bool> = const { Cell::new(true) }; // Windows sees a way to the internet (any adapter)
     static TICK: Cell<u32> = const { Cell::new(0) };
-    static EP: RefCell<Option<IAudioEndpointVolume>> = const { RefCell::new(None) };
+    static EP: RefCell<Option<(String, IAudioEndpointVolume)>> = const { RefCell::new(None) }; // default output: (its id, its volume)
     static TB_MSG: Cell<u32> = const { Cell::new(0) }; // "TaskbarCreated"
     static SH_MSG: Cell<u32> = const { Cell::new(0) }; // "SHELLHOOK": window events for the shell (we are the shell hook window without explorer)
     static EXP_TRAY: Cell<HWND> = const { Cell::new(null_mut()) }; // explorer's taskbar we registered with
@@ -691,6 +692,7 @@ unsafe fn show_tip_at(s: String, cx: i32, over: Option<i32>) {
 thread_local! {
     static SW_MON: Cell<RECT> = const { Cell::new(RECT { left: 0, top: 0, right: 0, bottom: 0 }) }; // the monitor it is shown on
     static SW_CARDS: RefCell<(Vec<RECT>, Vec<isize>)> = const { RefCell::new((Vec::new(), Vec::new())) }; // card rects, DWM previews
+    static SW_HOT: Cell<Option<usize>> = const { Cell::new(None) }; // the card under the pointer: lit, but not chosen until clicked
 }
 
 unsafe fn alt_tab(back: bool) {
@@ -718,6 +720,7 @@ unsafe fn alt_tab(back: bool) {
             return SWITCHING.store(false, Relaxed);
         }
         SW.set((v, if n == 1 { 0 } else if back { n - 1 } else { 1 }));
+        SW_HOT.set(None);
         SW_MON.set(mon);
         sw_layout(sw);
     } else {
@@ -785,14 +788,21 @@ unsafe extern "system" fn sw_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     let (x, y) = ((lp & 0xffff) as i16 as i32, (lp >> 16) as i16 as i32);
     let at = || SW_CARDS.with_borrow(|(r, _)| thumbs::card_at(r, x, y));
     match msg {
-        WM_PAINT => SW.with_borrow(|(v, sel)| SW_CARDS.with_borrow(|(r, ids)| thumbs::paint(hwnd, v, r, ids, Some(*sel)))),
+        WM_PAINT => SW.with_borrow(|(v, sel)| SW_CARDS.with_borrow(|(r, ids)| thumbs::paint(hwnd, v, r, ids, Some(*sel), SW_HOT.get()))),
         WM_MOUSEACTIVATE => return MA_NOACTIVATE as isize,
-        // the pointer picks a card, a click switches to it, a middle click or × closes it, the wheel steps through
+        // the pointer only lights a card: releasing Alt still switches to the one chosen with Tab. A click switches to the
+        // card under it, a middle click or × closes it, the wheel steps through
         WM_MOUSEMOVE => {
-            if let Some(k) = at() {
-                if SW.with_borrow_mut(|(_, i)| std::mem::replace(i, k)) != k {
-                    InvalidateRect(hwnd, null(), 0);
-                }
+            let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+            TrackMouseEvent(&mut tme);
+            let k = at();
+            if SW_HOT.replace(k) != k {
+                InvalidateRect(hwnd, null(), 0);
+            }
+        }
+        WM_MOUSELEAVE => {
+            if SW_HOT.take().is_some() {
+                InvalidateRect(hwnd, null(), 0);
             }
         }
         WM_LBUTTONUP | WM_MBUTTONUP => {
@@ -2723,10 +2733,11 @@ unsafe fn paint(hwnd: HWND) {
 
     if let Some(d) = glassy {
         let slab = RECT { left: side_gap(), top: 0, right: cr.right - side_gap(), bottom: h - float_gap() };
+        // an icon without a smooth copy is painted on the key colour, like the rest
+        icons.iter().filter(|i| !is_smooth(i.0)).for_each(|&(ic, x, y, k)| app_icon(d.dc, ic, x, y, k));
         glass::compose_bar(&d, glass::Slab { r: slab, rad: sc(BAR_RAD) as f32 });
         for &(ic, x, y, k) in &icons {
-            app_icon(d.dc, ic, x, y, k);
-            d.solid(RECT { left: (x - k / 2.0) as i32 - 1, top: (y - k / 2.0) as i32 - 1, right: (x + k / 2.0) as i32 + 2, bottom: (y + k / 2.0) as i32 + 2 });
+            d.icon(ic, x, y, k);
         }
         glass::per_pixel(hwnd, true);
         glass::present(hwnd, &d, 255);
@@ -3800,6 +3811,10 @@ fn main() {
                 }
                 "wifi" => fly::toggle(fly::Kind::Wifi),
                 "cal" => fly::toggle(fly::Kind::Cal),
+                "mixer" => {
+                    fly::toggle(fly::Kind::Quick);
+                    fly::show_mixer();
+                }
                 "start" => {
                     fly::warm_up();
                     thread::spawn(fly::load_apps);

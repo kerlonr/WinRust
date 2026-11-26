@@ -1,16 +1,17 @@
 //! topbar: status (split out of main.rs; shares its items through `super::*`).
 use super::*;
 
+/// The volume of the default output. It is looked up every time: the default can change under us (a headset plugged in,
+/// another output chosen in Settings) while the old endpoint keeps answering, so a kept one would move the wrong device.
 pub(crate) unsafe fn endpoint() -> Option<IAudioEndpointVolume> {
+    let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+    let d = en.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+    let id = crate::mixer::device_id(&d)?;
     EP.with_borrow_mut(|e| {
-        if e.is_none() {
-            *e = (|| -> windows::core::Result<IAudioEndpointVolume> {
-                let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-                en.GetDefaultAudioEndpoint(eRender, eConsole)?.Activate(CLSCTX_ALL, None)
-            })()
-            .ok();
+        if e.as_ref().is_none_or(|(old, _)| *old != id) {
+            *e = d.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok().map(|v| (id, v));
         }
-        e.clone()
+        e.as_ref().map(|(_, v)| v.clone())
     })
 }
 

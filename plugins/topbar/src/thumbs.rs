@@ -191,7 +191,8 @@ unsafe fn ring(host: HWND, c: &RECT) -> RECT {
 
 /// Paints the cards (background, title row with icon and close box, big icon where DWM shows no preview) of `host`.
 /// `sel` gets the accent ring.
-pub(crate) unsafe fn paint(host: HWND, wins: &[HWND], rects: &[RECT], ids: &[isize], sel: Option<usize>) {
+/// `hot`: the card under the pointer (Alt+Tab), lit halfway to the chosen one.
+pub(crate) unsafe fn paint(host: HWND, wins: &[HWND], rects: &[RECT], ids: &[isize], sel: Option<usize>, hot: Option<usize>) {
     let mut ps: PAINTSTRUCT = zeroed();
     let dc = BeginPaint(host, &mut ps);
     let mut r: RECT = zeroed();
@@ -209,7 +210,9 @@ pub(crate) unsafe fn paint(host: HWND, wins: &[HWND], rects: &[RECT], ids: &[isi
     }
     for (k, (&w, c)) in wins.iter().zip(rects).enumerate() {
         let on = sel == Some(k);
-        fill(mem, RECT { left: c.left + sc(2), top: c.top + sc(2), right: c.right - sc(2), bottom: c.bottom - sc(2) }, if on { pal().active } else { pal().hover }, sc(10));
+        let lit = !on && hot == Some(k);
+        let card = if on { pal().active } else if lit { mix(pal().hover, pal().active, 0.5) } else { pal().hover };
+        fill(mem, RECT { left: c.left + sc(2), top: c.top + sc(2), right: c.right - sc(2), bottom: c.bottom - sc(2) }, card, sc(10));
         let ic = CARD_ICONS.with_borrow(|all| all.get(&(host as usize)).and_then(|icons| icons.get(k)).copied().unwrap_or(null_mut()));
         let ic = if ic.is_null() { LoadIconW(null_mut(), IDI_APPLICATION) } else { ic };
         let t = sc(TITLE);
@@ -218,13 +221,12 @@ pub(crate) unsafe fn paint(host: HWND, wins: &[HWND], rects: &[RECT], ids: &[isi
         let n = GetWindowTextW(w, b.as_mut_ptr(), 256).max(0) as usize;
         let x = close_rect(c);
         text(mem, &String::from_utf16_lossy(&b[..n]), RECT { left: c.left + sc(30), top: c.top, right: x.left - sc(4), bottom: c.top + t }, pal().text, 0);
-        if on {
+        if on || lit {
             text(mem, "\u{2715}", x, pal().text, DT_CENTER);
         }
         let media = media_at(host, k);
         if let Some(m) = &media {
             let of = SelectObject(mem, fg);
-            let card = if on { pal().active } else { pal().hover };
             for b in 0..3 {
                 let br = media_rect(c, b);
                 if PV_HOT.get() == Some((k, b)) {
@@ -335,7 +337,7 @@ pub(crate) unsafe fn hide_preview() {
 pub(crate) unsafe extern "system" fn pv_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let (x, y) = ((lp & 0xffff) as i16 as i32, (lp >> 16) as i16 as i32);
     match msg {
-        WM_PAINT => PV.with_borrow(|(w, r, ids, sel)| paint(hwnd, w, r, ids, *sel)),
+        WM_PAINT => PV.with_borrow(|(w, r, ids, sel)| paint(hwnd, w, r, ids, *sel, None)),
         WM_MOUSEACTIVATE => return MA_NOACTIVATE as isize,
         WM_MOUSEMOVE => {
             let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };

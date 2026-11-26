@@ -196,7 +196,7 @@ thread_local! {
 }
 
 /// The shell's display name of an item.
-unsafe fn shell_name(path: &str) -> Option<String> {
+pub(crate) unsafe fn shell_name(path: &str) -> Option<String> {
     use windows::Win32::{System::Com::CoTaskMemFree, UI::Shell::{IShellItem, SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY}};
     let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide(path).as_ptr()), None).ok()?;
     let p = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
