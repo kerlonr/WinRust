@@ -847,9 +847,20 @@ unsafe fn set_state(hwnd: HWND, state: usize) {
     SHAppBarMessage(ABM_SETSTATE, &mut ab);
 }
 
+unsafe fn get_state(hwnd: HWND) -> usize {
+    let mut ab: APPBARDATA = zeroed();
+    ab.cbSize = size_of::<APPBARDATA>() as u32;
+    ab.hWnd = hwnd;
+    SHAppBarMessage(ABM_GETSTATE, &mut ab)
+}
+
 /// Hides the real taskbar and sets it to auto-hide so Windows gives its work-area strip back.
 unsafe fn hide_taskbar() {
-    set_state(tray()[0], ABS_AUTOHIDE as usize);
+    // ABM_SETSTATE, even to the mode it already has, makes explorer show its taskbar again a few seconds later and reset
+    // the work area to the whole screen; hiding it again set it again: every window resized every ~3 s, for ever
+    if get_state(tray()[0]) & ABS_AUTOHIDE as usize == 0 {
+        set_state(tray()[0], ABS_AUTOHIDE as usize);
+    }
     for t in tray().into_iter().filter(|t| !t.is_null()) {
         ShowWindow(t, SW_HIDE);
     }
@@ -879,10 +890,7 @@ unsafe fn remember_taskbar_state() -> usize {
     if tb.is_null() {
         return ABS_ALWAYSONTOP as usize;
     }
-    let mut ab: APPBARDATA = zeroed();
-    ab.cbSize = size_of::<APPBARDATA>() as u32;
-    ab.hWnd = tb;
-    let s = SHAppBarMessage(ABM_GETSTATE, &mut ab);
+    let s = get_state(tb);
     let _ = std::fs::write(taskbar_state_file(), s.to_string());
     s
 }
